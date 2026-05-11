@@ -1,0 +1,123 @@
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: system-ui, sans-serif;
+  background: #1a1a1a;
+  color: #e8e8e8;
+}
+
+#app {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 1rem;
+}
+
+header h1 {
+  margin: 0;
+  font-size: 1.5rem;
+}
+
+.subtitle {
+  margin: 0.25rem 0 1rem;
+  color: #999;
+  font-size: 0.9rem;
+}
+
+.toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: center;
+  margin-bottom: 1rem;
+}
+
+button {
+  padding: 0.4rem 0.75rem;
+  cursor: pointer;
+  border: 1px solid #444;
+  background: #333;
+  color: #eee;
+  border-radius: 4px;
+}
+
+button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+button.primary {
+  background: #2a5a2a;
+  border-color: #3a7a3a;
+}
+
+.status {
+  margin-left: auto;
+  font-weight: 600;
+}
+
+.status.running {
+  color: #6c6;
+}
+
+.table-wrap {
+  overflow-x: auto;
+  border: 1px solid #333;
+  border-radius: 4px;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.85rem;
+}
+
+th,
+td {
+  border-bottom: 1px solid #333;
+  padding: 0.35rem 0.5rem;
+  text-align: left;
+}
+
+th {
+  background: #252525;
+}
+
+input[type="text"],
+input[type="number"] {
+  width: 100%;
+  min-width: 0;
+  padding: 0.25rem 0.35rem;
+  border: 1px solid #444;
+  background: #222;
+  color: #eee;
+  border-radius: 3px;
+}
+
+td.narrow {
+  width: 2.5rem;
+}
+
+.log-section {
+  margin-top: 1.5rem;
+}
+
+.log-section h2 {
+  font-size: 1rem;
+  margin: 0 0 0.5rem;
+}
+
+#log {
+  margin: 0;
+  padding: 0.75rem;
+  background: #111;
+  border: 1px solid #333;
+  border-radius: 4px;
+  max-height: 220px;
+  overflow: auto;
+  font-size: 0.8rem;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
