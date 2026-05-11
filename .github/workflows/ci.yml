@@ -1,0 +1,89 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: rustfmt
+        run: cargo fmt --all -- --check
+
+  test:
+    runs-on: ubuntu-latest
+    needs: check
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      - name: Typecheck and Vite build
+        run: npm run build
+
+  build:
+    runs-on: windows-latest
+    needs: test
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install LLVM (bindgen / grafton-ndi)
+        run: choco install llvm -y --no-progress
+
+      - name: Add LLVM to PATH
+        shell: pwsh
+        run: |
+          $llvm = "C:\Program Files\LLVM\bin"
+          if (Test-Path $llvm) { Add-Content $env:GITHUB_PATH $llvm }
+
+      - run: npm ci
+
+      - name: Detect NDI SDK
+        id: ndi
+        shell: pwsh
+        run: |
+          $ndi = Join-Path ${env:ProgramFiles} "NDI\NDI 6 SDK"
+          if (Test-Path $ndi) {
+            "has_ndi=true" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+            Write-Host "NDI SDK found at $ndi"
+          } else {
+            "has_ndi=false" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+            Write-Host "::warning::NDI 6 SDK not found. Install from https://ndi.video/type/developer/ for native Windows CI."
+          }
+
+      - name: cargo test
+        if: steps.ndi.outputs.has_ndi == 'true'
+        run: cargo test -p momaku --locked
+
+      - name: cargo build (release)
+        if: steps.ndi.outputs.has_ndi == 'true'
+        run: cargo build -p momaku --release --locked
+
+      - name: Skip native build without NDI SDK
+        if: steps.ndi.outputs.has_ndi != 'true'
+        run: echo "Skipping cargo test/build without NDI SDK on this runner."

@@ -142,7 +142,16 @@ pub fn run() {
         )
         .try_init();
 
-    tauri::Builder::default()
+    let mut builder = tauri::Builder::default();
+
+    #[cfg(desktop)]
+    {
+        builder = builder
+            .plugin(tauri_plugin_updater::Builder::new().build())
+            .plugin(tauri_plugin_process::init());
+    }
+
+    builder
         .setup(|app| {
             let dir = directories::ProjectDirs::from("com", "flowing", "momaku")
                 .expect("ProjectDirs::from (ホームディレクトリが利用できません)")
@@ -165,4 +174,14 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn version_is_semver() {
+        let v = env!("CARGO_PKG_VERSION");
+        assert!(!v.is_empty());
+        assert!(v.chars().next().unwrap().is_ascii_digit());
+    }
 }

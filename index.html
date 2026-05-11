@@ -3,44 +3,12 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="dark" />
     <title>momaku</title>
-    <script type="module" src="/src/main.ts" defer></script>
     <link rel="stylesheet" href="/src/style.css" />
   </head>
   <body>
-    <div id="app">
-      <header>
-        <h1>momaku</h1>
-        <p class="subtitle">Web → NDI（ビデオのみ）</p>
-      </header>
-      <section class="toolbar">
-        <button id="btn-add" type="button">行を追加</button>
-        <button id="btn-save" type="button">設定を保存</button>
-        <button id="btn-start" type="button" class="primary">開始</button>
-        <button id="btn-stop" type="button" disabled>停止</button>
-        <span id="status" class="status">停止中</span>
-      </section>
-      <section class="table-wrap">
-        <table id="streams-table">
-          <thead>
-            <tr>
-              <th></th>
-              <th>URL</th>
-              <th>NDI 名</th>
-              <th>幅</th>
-              <th>高さ</th>
-              <th>FPS</th>
-              <th>JPEG 品質</th>
-              <th>everyNth</th>
-            </tr>
-          </thead>
-          <tbody id="streams-body"></tbody>
-        </table>
-      </section>
-      <section class="log-section">
-        <h2>ログ</h2>
-        <pre id="log"></pre>
-      </section>
-    </div>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

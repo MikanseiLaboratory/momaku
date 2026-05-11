@@ -26,3 +26,5 @@ grafton-ndi = { version = "0.11", features = ["tokio"] }
 chromiumoxide = "0.9"
 base64 = "0.22"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+tauri-plugin-updater = "2"
+tauri-plugin-process = "2"
