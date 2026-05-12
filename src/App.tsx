@@ -16,8 +16,6 @@ export type StreamRow = {
   width: number;
   height: number;
   fps: number;
-  jpegQuality: number;
-  screencastEveryNthFrame: number | null;
 };
 
 type LogEntry = { id: string; text: string };
@@ -29,8 +27,6 @@ function defaultRow(): StreamRow {
     width: 1280,
     height: 720,
     fps: 30,
-    jpegQuality: 85,
-    screencastEveryNthFrame: null,
   };
 }
 
@@ -105,33 +101,6 @@ const StreamRowEditor = memo(function StreamRowEditor({
           aria-label={`ストリーム ${index + 1} の FPS`}
         />
       </td>
-      <td>
-        <input
-          className="field field-num"
-          type="number"
-          value={row.jpegQuality}
-          min={1}
-          max={100}
-          onChange={(e) => onPatch(index, { jpegQuality: Number(e.target.value) })}
-          aria-label={`ストリーム ${index + 1} の JPEG 品質`}
-        />
-      </td>
-      <td>
-        <input
-          className="field field-num"
-          type="number"
-          value={row.screencastEveryNthFrame ?? ""}
-          min={1}
-          placeholder="自動"
-          onChange={(e) => {
-            const v = e.target.value;
-            onPatch(index, {
-              screencastEveryNthFrame: v === "" ? null : Number(v),
-            });
-          }}
-          aria-label={`ストリーム ${index + 1} の everyNth（空で自動）`}
-        />
-      </td>
     </tr>
   );
 });
@@ -197,20 +166,21 @@ export function App() {
     let active = true;
     const unlisteners: (() => void)[] = [];
 
-    const register = (fn: () => void) => {
-      if (!active) fn();
-      else unlisteners.push(fn);
-    };
-
     void (async () => {
-      const uLog = await listen<{ message: string }>("engine-log", (ev) => {
-        appendLog(ev.payload.message);
-      });
-      register(uLog);
-      const uStatus = await listen<{ running: boolean }>("engine-status", (ev) => {
-        setRunning(ev.payload.running);
-      });
-      register(uStatus);
+      const [uLog, uStatus] = await Promise.all([
+        listen<{ message: string }>("engine-log", (ev) => {
+          appendLog(ev.payload.message);
+        }),
+        listen<{ running: boolean }>("engine-status", (ev) => {
+          setRunning(ev.payload.running);
+        }),
+      ]);
+      if (!active) {
+        uLog();
+        uStatus();
+        return;
+      }
+      unlisteners.push(uLog, uStatus);
     })();
 
     return () => {
@@ -260,6 +230,30 @@ export function App() {
     }
   }, [appendLog]);
 
+  useEffect(() => {
+    if (!running) return;
+    const sendKey = (kind: "keyDown" | "keyUp", ev: KeyboardEvent) => {
+      const t = ev.target as HTMLElement | null;
+      if (t?.closest?.("input, textarea, select, button")) return;
+      if (ev.repeat) return;
+      ev.preventDefault();
+      void invoke("submit_remote_input", {
+        input: {
+          streamIndex: 0,
+          event: { kind, key: ev.key, keysym: null as number | null },
+        },
+      }).catch(() => {});
+    };
+    const down = (e: KeyboardEvent) => sendKey("keyDown", e);
+    const up = (e: KeyboardEvent) => sendKey("keyUp", e);
+    window.addEventListener("keydown", down);
+    window.addEventListener("keyup", up);
+    return () => {
+      window.removeEventListener("keydown", down);
+      window.removeEventListener("keyup", up);
+    };
+  }, [running]);
+
   const handleCheckUpdate = useCallback(async () => {
     appendLog("アップデートを確認しています…");
     setBusy("update");
@@ -281,7 +275,7 @@ export function App() {
   }, [appendLog]);
 
   const ready = rows !== null;
-  const colCount = 8;
+  const colCount = 6;
 
   return (
     <div className="app-shell">
@@ -353,8 +347,6 @@ export function App() {
                   <th scope="col">幅</th>
                   <th scope="col">高さ</th>
                   <th scope="col">FPS</th>
-                  <th scope="col">JPEG 品質</th>
-                  <th scope="col">everyNth</th>
                 </tr>
               </thead>
               <tbody>

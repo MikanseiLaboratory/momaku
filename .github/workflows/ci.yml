@@ -15,8 +15,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: 1.88
           components: rustfmt
 
       - name: rustfmt
@@ -45,7 +46,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.88
+
+      - name: MSVC (mozangle / Servo)
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
 
       - uses: actions/setup-node@v4
         with:

@@ -1,11 +1,19 @@
 mod engine;
 
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 
+use engine::input::InputQueue;
 use engine::{EngineLogPayload, EngineStatusPayload, StreamConfig};
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::{watch, Mutex};
+
+/// Servo エンジン稼働中のみ `Some`。`submit_remote_input` が参照します。
+static ENGINE_INPUT: StdMutex<Option<InputQueue>> = StdMutex::new(None);
+
+pub fn set_engine_input_queue(q: Option<InputQueue>) {
+    *ENGINE_INPUT.lock().expect("ENGINE_INPUT lock poisoned") = q;
+}
 
 pub struct RunningEngine {
     pub shutdown_tx: watch::Sender<bool>,
@@ -25,8 +33,6 @@ async fn load_streams(path: &PathBuf) -> Result<Vec<StreamConfig>, String> {
             width: 1280,
             height: 720,
             fps: 30,
-            jpeg_quality: 85,
-            screencast_every_nth_frame: None,
         }]);
     }
     let t = tokio::fs::read_to_string(path)
@@ -41,7 +47,10 @@ async fn get_streams(state: State<'_, AppState>) -> Result<Vec<StreamConfig>, St
 }
 
 #[tauri::command]
-async fn save_streams(state: State<'_, AppState>, streams: Vec<StreamConfig>) -> Result<(), String> {
+async fn save_streams(
+    state: State<'_, AppState>,
+    streams: Vec<StreamConfig>,
+) -> Result<(), String> {
     for s in &streams {
         s.validate().map_err(|e| e.to_string())?;
     }
@@ -62,6 +71,22 @@ async fn get_engine_running(state: State<'_, AppState>) -> Result<bool, String> 
     Ok(state.engine.lock().await.is_some())
 }
 
+/// 付属ビューア等からのリモート操作（エンジン稼働中のみ有効）。
+#[tauri::command]
+fn submit_remote_input(input: engine::RemoteInput) -> Result<(), String> {
+    let g = ENGINE_INPUT
+        .lock()
+        .map_err(|_| "入力キューがロックできません".to_string())?;
+    let Some(q) = g.as_ref() else {
+        return Err("エンジン停止中は入力を受け付けません".into());
+    };
+    let mut inner = q
+        .lock()
+        .map_err(|_| "入力キュー内部のロックに失敗しました".to_string())?;
+    inner.push_back(input);
+    Ok(())
+}
+
 #[tauri::command]
 async fn start_outputs(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
     let streams = load_streams(&state.streams_path).await?;
@@ -71,6 +96,7 @@ async fn start_outputs(app: AppHandle, state: State<'_, AppState>) -> Result<(),
     for s in &streams {
         s.validate().map_err(|e| e.to_string())?;
     }
+    StreamConfig::validate_servo_bundle(&streams).map_err(|e| e.to_string())?;
 
     let mut g = state.engine.lock().await;
     if g.is_some() {
@@ -94,10 +120,7 @@ async fn start_outputs(app: AppHandle, state: State<'_, AppState>) -> Result<(),
         }
         let mut slot = engine_slot.lock().await;
         *slot = None;
-        let _ = app_task.emit(
-            "engine-status",
-            EngineStatusPayload { running: false },
-        );
+        let _ = app_task.emit("engine-status", EngineStatusPayload { running: false });
     });
 
     *g = Some(RunningEngine {
@@ -106,11 +129,8 @@ async fn start_outputs(app: AppHandle, state: State<'_, AppState>) -> Result<(),
     });
     drop(g);
 
-    app.emit(
-        "engine-status",
-        EngineStatusPayload { running: true },
-    )
-    .map_err(|e| e.to_string())?;
+    app.emit("engine-status", EngineStatusPayload { running: true })
+        .map_err(|e| e.to_string())?;
 
     Ok(())
 }
@@ -137,7 +157,7 @@ pub fn run() {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-                tracing_subscriber::EnvFilter::new("warn,momaku_lib=info,chromiumoxide=warn")
+                tracing_subscriber::EnvFilter::new("warn,momaku_lib=info,servo=warn")
             }),
         )
         .try_init();
@@ -169,6 +189,7 @@ pub fn run() {
             get_streams,
             save_streams,
             get_engine_running,
+            submit_remote_input,
             start_outputs,
             stop_outputs,
         ])

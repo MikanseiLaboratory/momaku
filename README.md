@@ -6,14 +6,14 @@ Inspired by [Vingester](https://github.com/rse/vingester).
 
 ## Stack
 
-Tauri 2, NDI, headless Chromium.
+Tauri 2, NDI, embedded **Servo** (no separate Chrome install).
 
 ## Prerequisites
 
-- [Rust](https://rustup.rs/)
+- [Rust](https://rustup.rs/) (workspace pins **1.88** via `rust-toolchain.toml`)
 - [Node.js](https://nodejs.org/)
 - [NDI SDK](https://ndi.video/type/developer/)
-- [Google Chrome](https://www.google.com/chrome/) or [Chromium](https://www.chromium.org/chromium-projects/)
+- **Windows**: Visual Studio **C++ build tools** (for `mozangle` / Servo). Use a **Developer** shell or CI’s `ilammy/msvc-dev-cmd` so MSVC is on `PATH`.
 
 On Windows, a 64-bit [LLVM](https://releases.llvm.org/) installation may be required to build NDI-related bindings. This repo includes [`.cargo/config.toml`](.cargo/config.toml) with `BINDGEN_EXTRA_CLANG_ARGS = "-m64"` for MSVC.
 

@@ -4,10 +4,16 @@ version = "0.1.0"
 description = "Web page to NDI transmitter"
 authors = ["momaku"]
 edition = "2021"
+rust-version = "1.86"
 
 [lib]
 name = "momaku_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
+
+[features]
+default = []
+# NDI Advanced SDK 連動（grafton-ndi の async 完了コールバック等）。KVM API はクレート未実装のため現状は効果限定。
+ndi-kvm = ["grafton-ndi/advanced_sdk"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
@@ -18,13 +24,25 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 directories = "5"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
-futures = "0.3"
+futures = { version = "0.3", features = ["std", "async-await"] }
 anyhow = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 grafton-ndi = { version = "0.11", features = ["tokio"] }
-chromiumoxide = "0.9"
-base64 = "0.22"
-image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+
+servo = { version = "0.1", default-features = false, features = [
+    "baked-in-resources",
+    "clipboard",
+    "js_jit",
+    "no-wgl",
+] }
+dpi = "0.1"
+euclid = "0.22"
+url = "2"
+
 tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
+
+[[example]]
+name = "servo_smoke"
+path = "examples/servo_smoke.rs"
