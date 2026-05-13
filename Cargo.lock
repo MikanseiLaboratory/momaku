@@ -2710,7 +2710,7 @@ dependencies = [
 [[package]]
 name = "grafton-ndi"
 version = "0.11.0"
-source = "git+https://github.com/FlowingSPDG/grafton-ndi.git?rev=753fa107880e40d5c98ac0f0aad499783868c665#753fa107880e40d5c98ac0f0aad499783868c665"
+source = "git+https://github.com/FlowingSPDG/grafton-ndi.git?rev=50363bbf0b79b665d09c5190d9f18b2a1ae15c2f#50363bbf0b79b665d09c5190d9f18b2a1ae15c2f"
 dependencies = [
  "bindgen",
  "lodepng",
