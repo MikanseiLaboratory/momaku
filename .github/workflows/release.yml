@@ -1,0 +1,73 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: windows-latest
+
+    runs-on: ${{ matrix.platform }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install LLVM (bindgen / grafton-ndi)
+        run: choco install llvm -y --no-progress
+
+      - name: Add LLVM to PATH
+        shell: pwsh
+        run: |
+          $llvm = "C:\Program Files\LLVM\bin"
+          if (Test-Path $llvm) { Add-Content $env:GITHUB_PATH $llvm }
+
+      - run: npm ci
+
+      - name: Require NDI 6 SDK
+        shell: pwsh
+        run: |
+          $ndi = Join-Path ${env:ProgramFiles} "NDI\NDI 6 SDK"
+          if (-not (Test-Path $ndi)) {
+            Write-Host "::error::NDI 6 SDK not found at $ndi. Install it on the runner or use a self-hosted Windows agent with the SDK."
+            exit 1
+          }
+
+      - name: Require TAURI_SIGNING_PRIVATE_KEY
+        shell: pwsh
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:TAURI_SIGNING_PRIVATE_KEY)) {
+            Write-Host "::error::Set repository secret TAURI_SIGNING_PRIVATE_KEY (minisign private key, same pair as pubkey in tauri.conf.json)."
+            exit 1
+          }
+
+      - uses: tauri-apps/tauri-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          projectPath: src-tauri
+          tagName: ${{ github.ref_name }}
+          releaseName: "momaku ${{ github.ref_name }}"
+          releaseBody: "Signed installer and updater metadata (latest.json). See [README](https://github.com/MikanseiLaboratory/momaku#github-actions) for CI, secrets, and the auto updater."
+          releaseDraft: true
+          prerelease: false
+          args: --verbose --config bundle-with-updater.conf.json

@@ -1,0 +1,11 @@
+{
+  "identifier": "default",
+  "description": "default permissions",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "core:event:default",
+    "updater:default",
+    "process:default"
+  ]
+}

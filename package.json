@@ -1,0 +1,32 @@
+{
+  "name": "momaku",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview",
+    "tauri": "tauri",
+    "tauri:dev:win": "pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/tauri-dev-windows.ps1",
+    "tauri:clippy:win": "pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/tauri-clippy-windows.ps1",
+    "tauri:build:win": "pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/tauri-build-windows.ps1",
+    "tauri:dev:mac": "bash scripts/tauri-dev-mac.sh",
+    "tauri:build:mac": "bash scripts/tauri-build-mac.sh"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2",
+    "@tauri-apps/plugin-process": "^2.3.1",
+    "@tauri-apps/plugin-updater": "^2.10.1",
+    "react": "^19.2.6",
+    "react-dom": "^19.2.6"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2",
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^4.3.4",
+    "typescript": "~5.6.0",
+    "vite": "^6.0.0"
+  }
+}
