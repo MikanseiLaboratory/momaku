@@ -6,3 +6,4 @@ src-tauri/gen/
 src-tauri/momaku-signing.key
 src-tauri/momaku-signing.key.pub
 *.signing.key
+vendor/
