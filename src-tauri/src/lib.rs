@@ -2,14 +2,15 @@ mod engine;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex as StdMutex};
+use std::sync::{Arc, LazyLock, Mutex as StdMutex};
 
 use engine::{EngineLogPayload, EngineStatusPayload, InputQueue, StreamConfig};
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::{watch, Mutex};
 
-/// 送出中ストリームindex→入力キュー（`submit_remote_input`が参照）
-static ENGINE_INPUTS: StdMutex<HashMap<usize, InputQueue>> = StdMutex::new(HashMap::new());
+/// 送出中ストリーム index → 入力キュー（`submit_remote_input` が参照）
+static ENGINE_INPUTS: LazyLock<StdMutex<HashMap<usize, InputQueue>>> =
+    LazyLock::new(|| StdMutex::new(HashMap::new()));
 
 pub fn register_stream_input(index: usize, q: InputQueue) {
     ENGINE_INPUTS
