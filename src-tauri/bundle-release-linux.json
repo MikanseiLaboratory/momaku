@@ -1,7 +1,6 @@
 {
   "bundle": {
     "targets": ["deb", "appimage"],
-    "icon": ["icons/128x128.png", "icons/icon.png"],
-    "createUpdaterArtifacts": false
+    "icon": ["icons/128x128.png", "icons/icon.png"]
   }
 }

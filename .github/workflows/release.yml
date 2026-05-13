@@ -12,24 +12,22 @@ jobs:
   publish:
     strategy:
       fail-fast: false
+      # tauri-action merges latest.json: each row downloads existing release asset platforms then appends this OS/arch.
+      # Rare race if two jobs upload simultaneously; re-run failed job if a platform entry is missing.
       matrix:
         include:
           - runner: windows-latest
             ndi: windows
             tauri_args: "--verbose --config bundle-with-updater.conf.json"
-            include_updater_json: "true"
           - runner: macos-15
             ndi: macos
             tauri_args: "--verbose --config bundle-with-updater.conf.json --config bundle-release-macos.json"
-            include_updater_json: "false"
           - runner: macos-13
             ndi: macos
             tauri_args: "--verbose --config bundle-with-updater.conf.json --config bundle-release-macos.json"
-            include_updater_json: "false"
           - runner: ubuntu-24.04
             ndi: linux
             tauri_args: "--verbose --config bundle-with-updater.conf.json --config bundle-release-linux.json"
-            include_updater_json: "false"
 
     runs-on: ${{ matrix.runner }}
 
@@ -124,9 +122,9 @@ jobs:
           releaseName: "momaku ${{ github.ref_name }}"
           releaseBody: |
             Signed installers for **Windows**, **macOS** (Apple Silicon + Intel), and **Ubuntu** (deb + AppImage).
-            The **latest.json** updater artifact is uploaded from the Windows matrix row only (single-platform updater JSON).
+            **latest.json** is updated by each matrix job: `tauri-action` loads the existing release asset and merges `platforms` (see `upload-version-json.ts` in [tauri-apps/tauri-action](https://github.com/tauri-apps/tauri-action)).
             Linux NDI SDK is fetched automatically in CI (same pattern as [DistroAV `CI/libndi-get.sh`](https://github.com/DistroAV/DistroAV/blob/master/CI/libndi-get.sh)). If macOS/Windows downloads from `downloads.ndi.tv` fail on the runner, set optional secrets **NDI_SDK_MACOS_URL** / **NDI_SDK_WINDOWS_URL** (direct archive URLs).
           releaseDraft: true
           prerelease: false
-          includeUpdaterJson: ${{ matrix.include_updater_json == 'true' }}
+          includeUpdaterJson: true
           args: ${{ matrix.tauri_args }}
