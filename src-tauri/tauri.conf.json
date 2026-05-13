@@ -35,7 +35,7 @@
   },
   "plugins": {
     "updater": {
-      "pubkey": "RWSLmq6hbKgpK/Qi/0qzCBfqjRi3UivYWXZvCC7FKSdDY+b0UHvs95Ds",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDJCMjlBODZDQTFBRTlBOEIKUldTTG1xNmhiS2dwSy9RSi8wcXpDQmZxalJpM1VpdllXWFp2Q0M3RktTZERZK2IwUUh2czk1RHMK",
       "endpoints": [
         "https://github.com/MikanseiLaboratory/momaku/releases/latest/download/latest.json"
       ],

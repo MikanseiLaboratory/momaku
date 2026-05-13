@@ -91,13 +91,17 @@ jobs:
             }
           }
 
-      - name: Setup NDI SDK
+      - name: Setup NDI SDK (vendored)
         uses: ./.github/actions/setup-ndi-sdk
         with:
           platform: ${{ matrix.ndi }}
-          linux_url: ${{ secrets.NDI_SDK_LINUX_URL }}
-          macos_url: ${{ secrets.NDI_SDK_MACOS_URL }}
-          windows_url: ${{ secrets.NDI_SDK_WINDOWS_URL }}
+
+      - name: NDI on LD_LIBRARY_PATH (linuxdeploy / deb shlibs)
+        if: matrix.ndi == 'linux'
+        run: |
+          NDI_LIB="${GITHUB_WORKSPACE}/third_party/ndi-sdk-6/lib/x86_64-linux-gnu"
+          echo "LD_LIBRARY_PATH=${NDI_LIB}:${LD_LIBRARY_PATH:-}" >> "${GITHUB_ENV}"
+          ls -la "${NDI_LIB}"
 
       - run: npm ci
 
@@ -123,7 +127,7 @@ jobs:
           releaseBody: |
             Signed installers for **Windows**, **macOS** (Apple Silicon + Intel), and **Ubuntu** (deb + AppImage).
             **latest.json** is updated by each matrix job: `tauri-action` loads the existing release asset and merges `platforms` (see `upload-version-json.ts` in [tauri-apps/tauri-action](https://github.com/tauri-apps/tauri-action)).
-            Linux NDI SDK is fetched automatically in CI (same pattern as [DistroAV `CI/libndi-get.sh`](https://github.com/DistroAV/DistroAV/blob/master/CI/libndi-get.sh)). If macOS/Windows downloads from `downloads.ndi.tv` fail on the runner, set optional secrets **NDI_SDK_MACOS_URL** / **NDI_SDK_WINDOWS_URL** (direct archive URLs).
+            NDI SDK **v6** build files are vendored under `third_party/ndi-sdk-6` (no CI downloads). Refresh with `scripts/vendor-ndi-sdk-from-local.ps1` when upgrading the SDK.
           releaseDraft: true
           prerelease: false
           includeUpdaterJson: true
