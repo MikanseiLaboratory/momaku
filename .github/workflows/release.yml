@@ -123,7 +123,7 @@ jobs:
           releaseBody: |
             Signed installers for **Windows**, **macOS** (Apple Silicon + Intel), and **Ubuntu** (deb + AppImage).
             **latest.json** is updated by each matrix job: `tauri-action` loads the existing release asset and merges `platforms` (see `upload-version-json.ts` in [tauri-apps/tauri-action](https://github.com/tauri-apps/tauri-action)).
-            Linux NDI SDK is fetched automatically in CI (same pattern as [DistroAV `CI/libndi-get.sh`](https://github.com/DistroAV/DistroAV/blob/master/CI/libndi-get.sh)). If macOS/Windows downloads from `downloads.ndi.tv` fail on the runner, set optional secrets **NDI_SDK_MACOS_URL** / **NDI_SDK_WINDOWS_URL** (direct archive URLs).
+            Windows uses the **vendored** NDI SDK headers and import library under `third_party/ndi-sdk-6` (no download). Linux NDI SDK is fetched in CI (same pattern as [DistroAV `CI/libndi-get.sh`](https://github.com/DistroAV/DistroAV/blob/master/CI/libndi-get.sh)). If macOS/Linux downloads from `downloads.ndi.tv` fail, set optional secrets **NDI_SDK_MACOS_URL** / **NDI_SDK_LINUX_URL**; optional **NDI_SDK_WINDOWS_URL** remains a fallback if the vendored tree is removed.
           releaseDraft: true
           prerelease: false
           includeUpdaterJson: true

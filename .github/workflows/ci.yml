@@ -90,7 +90,6 @@ jobs:
 
       - name: Setup NDI SDK (Windows)
         id: ndi_setup
-        continue-on-error: true
         uses: ./.github/actions/setup-ndi-sdk
         with:
           platform: windows
@@ -116,9 +115,9 @@ jobs:
           } else {
             "has_ndi=false" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
             if ('${{ steps.ndi_setup.outcome }}' -eq 'failure') {
-              Write-Host "::warning::NDI SDK auto-install failed and no SDK in Program Files. Set secret NDI_SDK_WINDOWS_URL or install NDI 6 SDK on the runner."
+              Write-Host "::warning::NDI SDK setup failed and no SDK in Program Files. Ensure third_party/ndi-sdk-6 is present, set NDI_SDK_WINDOWS_URL, or install NDI 6 SDK on the runner."
             } else {
-              Write-Host "::warning::NDI 6 SDK not found. Install from https://ndi.video/type/developer/ or set NDI_SDK_WINDOWS_URL."
+              Write-Host "::warning::NDI 6 SDK not found. Use repo third_party/ndi-sdk-6, install from https://ndi.video/type/developer/, or set NDI_SDK_WINDOWS_URL."
             }
           }
 

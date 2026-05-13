@@ -1,7 +1,8 @@
 name: Setup NDI SDK
 description: >
-  Resolves NDI 6 SDK for CI builds. Linux follows DistroAV libndi-get.sh (downloads.ndi.tv).
-  macOS/Windows try official URLs first; set NDI_SDK_MACOS_URL / NDI_SDK_WINDOWS_URL if downloads are blocked.
+  Resolves NDI 6 SDK for CI builds. Windows uses third_party/ndi-sdk-6 when present; otherwise
+  downloads the official zip (optional NDI_SDK_WINDOWS_URL). Linux follows DistroAV (downloads.ndi.tv).
+  macOS uses the official tarball (optional NDI_SDK_MACOS_URL).
 inputs:
   platform:
     description: "linux | macos | windows"

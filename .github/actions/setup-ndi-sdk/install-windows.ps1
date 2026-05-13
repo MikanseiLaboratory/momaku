@@ -2,6 +2,16 @@ $ErrorActionPreference = 'Stop'
 if (-not $env:GITHUB_WORKSPACE) { throw 'GITHUB_WORKSPACE is required' }
 if (-not $env:GITHUB_ENV) { throw 'GITHUB_ENV is required' }
 
+$vendored = Join-Path $env:GITHUB_WORKSPACE 'third_party/ndi-sdk-6'
+$vendoredHdr = Join-Path $vendored 'include/Processing.NDI.Lib.h'
+$vendoredLib = Join-Path $vendored 'lib/x64/Processing.NDI.Lib.x64.lib'
+if ((Test-Path -LiteralPath $vendoredHdr) -and (Test-Path -LiteralPath $vendoredLib)) {
+    $resolved = (Resolve-Path -LiteralPath $vendored).Path
+    Add-Content -Path $env:GITHUB_ENV -Value "NDI_SDK_DIR=$resolved"
+    Write-Host "Using vendored NDI SDK for Windows at $resolved"
+    exit 0
+}
+
 $root = Join-Path $env:GITHUB_WORKSPACE '.ndi'
 $tmp = Join-Path $root 'tmp'
 New-Item -ItemType Directory -Force -Path $tmp | Out-Null
@@ -28,7 +38,7 @@ foreach ($u in $urls) {
     }
 }
 if (-not $ok) {
-    Write-Host '::error::Could not download NDI SDK for Windows. Host a zip of the SDK tree (include\, lib\x64\) and set repository secret NDI_SDK_WINDOWS_URL.'
+    Write-Host '::error::Could not download NDI SDK for Windows. Add third_party/ndi-sdk-6 (include + lib/x64), or host a zip of the SDK tree and set repository secret NDI_SDK_WINDOWS_URL.'
     exit 1
 }
 Write-Host '::endgroup::'

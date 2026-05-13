@@ -6,8 +6,15 @@ Set-Location (Split-Path -Parent $PSScriptRoot)
 . "$PSScriptRoot\_tauri-windows-env.ps1"
 
 $ndi = Join-Path ${env:ProgramFiles} 'NDI\NDI 6 SDK'
+$vendored = Join-Path $PWD 'third_party\ndi-sdk-6'
+$vendoredOk = (Test-Path (Join-Path $vendored 'include\Processing.NDI.Lib.h')) -and (Test-Path (Join-Path $vendored 'lib\x64\Processing.NDI.Lib.x64.lib'))
 if (-not (Test-Path $ndi)) {
-    throw "NDI 6 SDK not found at $ndi. Install from https://ndi.video/type/developer/ (same requirement as GitHub Actions)."
+    if ($vendoredOk) {
+        $env:NDI_SDK_DIR = (Resolve-Path -LiteralPath $vendored).Path
+        Write-Host "NDI_SDK_DIR=$env:NDI_SDK_DIR (third_party/ndi-sdk-6; Program Files SDK not installed)"
+    } else {
+        throw "NDI 6 SDK not found at $ndi and vendored third_party/ndi-sdk-6 is incomplete. Install from https://ndi.video/type/developer/ or sync third_party/ndi-sdk-6 from the repo."
+    }
 }
 
 if ([string]::IsNullOrWhiteSpace($env:TAURI_SIGNING_PRIVATE_KEY) -and [string]::IsNullOrWhiteSpace($env:TAURI_SIGNING_PRIVATE_KEY_PATH)) {

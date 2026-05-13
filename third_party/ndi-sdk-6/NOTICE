@@ -1,0 +1,19 @@
+NDI(R) SDK v6 — vendored subset for Windows CI and offline builds
+==================================================================
+
+This directory contains header files and the x64 static import library
+(Processing.NDI.Lib.x64.lib) from the NDI 6 SDK, in the layout expected by
+grafton-ndi (include/, lib/x64/).
+
+Distribution: Per Vizrt NDI documentation, NDI SDK header files may be
+included in open-source distributions; see:
+https://docs.ndi.video/all/developing-with-ndi/sdk/software-distribution
+and the NDI SDK License Agreement supplied with the SDK
+("NDI SDK License Agreement.pdf").
+
+Trademark: NDI(R) is a registered trademark of Vizrt NDI AB.
+
+Runtime: End users still need the NDI runtime / redistributable as described
+in the NDI SDK documentation; this repository does not replace the full SDK
+installer for Linux or macOS builds (those platforms continue to resolve the
+SDK in CI via .github/actions/setup-ndi-sdk).
