@@ -49,6 +49,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.88
+          components: clippy
 
       - name: MSVC (mozangle / Servo)
         uses: ilammy/msvc-dev-cmd@v1
@@ -69,6 +70,22 @@ jobs:
           $llvm = "C:\Program Files\LLVM\bin"
           if (Test-Path $llvm) { Add-Content $env:GITHUB_PATH $llvm }
 
+      # scripts/_tauri-windows-env.ps1 と同様（mozangle bindgen が MSVC ヘッダを正しく解釈するため）
+      - name: Bindgen / libclang env for MSVC includes
+        shell: pwsh
+        run: |
+          $llvmBin = "C:\Program Files\LLVM\bin"
+          if (Test-Path (Join-Path $llvmBin "libclang.dll")) {
+            "LIBCLANG_PATH=$llvmBin" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          }
+          if ($env:INCLUDE) {
+            $parts = $env:INCLUDE -split ';' | ForEach-Object { $_.Trim() } | Where-Object { $_ -and (Test-Path $_) }
+            if ($parts.Count -gt 0) {
+              $clangArgs = ($parts | ForEach-Object { "-isystem `"$_`"" }) -join ' '
+              "BINDGEN_EXTRA_CLANG_ARGS=$clangArgs" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+            }
+          }
+
       - run: npm ci
 
       - name: Detect NDI SDK
@@ -87,6 +104,10 @@ jobs:
       - name: cargo test
         if: steps.ndi.outputs.has_ndi == 'true'
         run: cargo test -p momaku --locked
+
+      - name: cargo clippy
+        if: steps.ndi.outputs.has_ndi == 'true'
+        run: cargo clippy -p momaku --all-targets --all-features --locked -- -D warnings
 
       - name: cargo build (release)
         if: steps.ndi.outputs.has_ndi == 'true'

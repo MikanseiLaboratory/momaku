@@ -30,7 +30,10 @@ impl AppSettings {
 }
 
 /// 行の NDI グループが空のとき、アプリ既定を使う（送出時に適用。`streams.json` は書き換えない）。
-pub fn effective_ndi_groups_for_stream(row_ndi: &Option<String>, settings: &AppSettings) -> Option<String> {
+pub fn effective_ndi_groups_for_stream(
+    row_ndi: &Option<String>,
+    settings: &AppSettings,
+) -> Option<String> {
     if let Some(ref g) = row_ndi {
         let t = g.trim();
         if !t.is_empty() {

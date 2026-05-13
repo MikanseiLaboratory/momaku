@@ -6,12 +6,15 @@
 //!
 //! Windowsでは**Visual Studio C++ ビルドツール**が必要です。
 
+use anyhow::Result;
 use dpi::PhysicalSize;
-use servo::SoftwareRenderingContext;
+use servo::{RenderingContext, SoftwareRenderingContext};
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let ctx = SoftwareRenderingContext::new(PhysicalSize::new(320, 240))?;
-    ctx.make_current()?;
+fn main() -> Result<()> {
+    let ctx = SoftwareRenderingContext::new(PhysicalSize::new(320, 240))
+        .map_err(|e| anyhow::anyhow!("SoftwareRenderingContext::new: {e:?}"))?;
+    ctx.make_current()
+        .map_err(|e| anyhow::anyhow!("make_current: {e:?}"))?;
     println!("servo_smoke: SoftwareRenderingContext OK");
     Ok(())
 }

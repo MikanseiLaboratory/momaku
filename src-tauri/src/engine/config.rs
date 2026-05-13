@@ -14,7 +14,7 @@ fn default_video_send_mode() -> VideoSendMode {
 /// 映像の `paint` と NDI 送出のタイミング（JSON では `"fixedFps"` / `"onDemand"` 文字列）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VideoSendMode {
-    /// ループを FPS で回し、毎ティック `paint` して NDI 送出する。
+    /// 累積デッドラインで間隔 `1/fps` を維持し、その時刻まで待機してから `paint` + NDI 送出する。
     FixedFps,
     /// Servo が `needs_paint` を立てたときのみ `paint` + 送出する。
     OnDemand,
@@ -128,7 +128,7 @@ pub(crate) fn emit_log_from_worker(
     app: tauri::AppHandle,
     message: String,
 ) {
-    let _ = runtime.spawn(async move {
+    drop(runtime.spawn(async move {
         let _ = emit_log(&app, message);
-    });
+    }));
 }

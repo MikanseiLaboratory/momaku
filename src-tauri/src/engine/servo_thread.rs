@@ -5,7 +5,8 @@
 //! - `Sender::new` / `drop`（`NDIlib_send_destroy`）は grafton-ndi の前提に合わせ FFI 専用スレッド `ndi_ffi_tx` に直列化する。
 //! - 停止時は `DropWithAck` で `Sender` を FFI 側へ渡し、ack をホストが非ブロッキングで待ってから
 //!   `done_tx` を返す（ソースがネットワークに残るのを防ぎ、ホストの `spin` もブロックしない）。
-//! - 映像は同期 `send_video` のみ。`send_video_async` は `flush_null_frame` で停止処理まで届かなくなるため使わない。
+//! - `fixedFps` は累積デッドライン（`1/fps`）で位相を保ち、`park_until` で次ティックまで待ってから送出する。
+//! - 映像は `send_video_async` と `AsyncVideoToken`（drop / `wait`）でゼロコピー送出する（[grafton-ndi `Sender`](https://docs.rs/grafton-ndi)）。
 //! - Servo 資源の drop は一括 `Vec::clear` ではなく順に行い `spin` を挟む（相互デッドロック回避）。
 //! - 新規 `Sender::new` の前に `flush_deferred_teardown_before_new_streams` で旧送出を片付け、mpsc FIFO で destroy→create の順を保証。
 
@@ -20,7 +21,8 @@ use anyhow::Context;
 use dpi::PhysicalSize;
 use euclid::{Box2D, Point2D, Scale};
 use grafton_ndi::{
-    PixelFormat, ScanType, Sender as NdiSender, SenderOptions, VideoFrame, NDI,
+    BorrowedVideoFrame, LineStrideOrSize, PixelFormat, ScanType, Sender as NdiSender,
+    SenderOptions, NDI,
 };
 use servo::{
     EventLoopWaker, RenderingContext, Servo, ServoBuilder, SoftwareRenderingContext, WebView,
@@ -50,7 +52,6 @@ impl EventLoopWaker for ChannelWaker {
 }
 
 struct ActiveStream {
-    stream_index: usize,
     cfg: StreamConfig,
     stop: Arc<AtomicBool>,
     inputs: InputQueue,
@@ -61,7 +62,10 @@ struct ActiveStream {
     delegate: Rc<DelegateState>,
     rendering_context: Rc<SoftwareRenderingContext>,
     sender: NdiSender,
-    last_frame: Option<Instant>,
+    /// `send_video_async` 用 BGRA（フレームごとに再利用）。
+    ndi_bgra_buffer: Vec<u8>,
+    /// `fixedFps` の次フレーム送出予定時刻（累積位相）。`None` は初回ティック前。
+    fixed_fps_deadline: Option<Instant>,
 }
 
 enum HostMessage {
@@ -80,9 +84,7 @@ static SERVO_HOST_TX: LazyLock<StdMutex<Option<mpsc::Sender<HostMessage>>>> =
     LazyLock::new(|| StdMutex::new(None));
 
 fn host_command_tx() -> mpsc::Sender<HostMessage> {
-    let mut g = SERVO_HOST_TX
-        .lock()
-        .expect("SERVO_HOST_TX mutex poisoned");
+    let mut g = SERVO_HOST_TX.lock().expect("SERVO_HOST_TX mutex poisoned");
     if let Some(tx) = g.as_ref() {
         return tx.clone();
     }
@@ -132,9 +134,7 @@ pub async fn run_single_stream(
         Ok(r) => r,
         Err(_) => {
             crate::unregister_stream_input(stream_index);
-            return Err(anyhow::anyhow!(
-                "Servoスレッドが結果を返さず終了しました"
-            ));
+            return Err(anyhow::anyhow!("Servoスレッドが結果を返さず終了しました"));
         }
     };
 
@@ -164,10 +164,42 @@ struct PendingNdiTeardown {
 
 const NDI_TEARDOWN_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// ホストループが `AddStream` を待つ間隔（ack 待ちなどで短いポーリングにする）。
-const SERVO_HOST_CMD_POLL: Duration = Duration::from_millis(4);
-/// メインループのスロットル（CPU占有を抑える）。
-const SERVO_HOST_LOOP_SLEEP: Duration = Duration::from_millis(2);
+/// メインループのスロットル（`onDemand` のみ。`fixedFps` 時はデッドライン待ちで律速する）。
+const SERVO_HOST_LOOP_SLEEP: Duration = Duration::from_millis(1);
+
+/// `deadline` まで待機（粗い `sleep` と短い残りの yield で OS 粒度のズレを抑える）。
+fn park_until(deadline: Instant) {
+    const COARSE: Duration = Duration::from_millis(2);
+    loop {
+        let now = Instant::now();
+        if now >= deadline {
+            return;
+        }
+        let left = deadline.saturating_duration_since(now);
+        if left > COARSE + Duration::from_micros(400) {
+            std::thread::sleep(left.saturating_sub(Duration::from_millis(1)));
+        } else if left > Duration::from_micros(400) {
+            std::thread::sleep(Duration::from_micros(300));
+        } else {
+            std::thread::yield_now();
+        }
+    }
+}
+
+/// 前ティックのデッドライン `prev` に基づき次の送出予定を進める（遅延時は間引き）。
+fn advance_fixed_fps_deadline(slot: &mut ActiveStream, min_dt: Duration, prev: Option<Instant>) {
+    let now = Instant::now();
+    slot.fixed_fps_deadline = Some(match prev {
+        None => now + min_dt,
+        Some(d) => {
+            let mut n = d + min_dt;
+            while n < now {
+                n += min_dt;
+            }
+            n
+        }
+    });
+}
 
 /// プロセス内で唯一の NDI ランタイムハンドル（ストリームや Servo ホストの再起動をまたいで共有）。
 static GLOBAL_NDI: OnceLock<NDI> = OnceLock::new();
@@ -341,9 +373,7 @@ fn drain_completed_ndi_teardowns(pending: &mut Vec<PendingNdiTeardown>) {
         let completed = match t.ack_rx.try_recv() {
             Ok(()) => true,
             Err(mpsc::TryRecvError::Disconnected) => true,
-            Err(mpsc::TryRecvError::Empty) => {
-                t.started_at.elapsed() > NDI_TEARDOWN_TIMEOUT
-            }
+            Err(mpsc::TryRecvError::Empty) => t.started_at.elapsed() > NDI_TEARDOWN_TIMEOUT,
         };
         if completed {
             if let Some(done_tx) = t.done_tx.take() {
@@ -436,7 +466,7 @@ fn servo_host_main(cmd_rx: mpsc::Receiver<HostMessage>) {
                 &mut slots,
             );
         }
-        match cmd_rx.recv_timeout(SERVO_HOST_CMD_POLL) {
+        match cmd_rx.try_recv() {
             Ok(HostMessage::AddStream {
                 stream_index,
                 cfg,
@@ -459,8 +489,8 @@ fn servo_host_main(cmd_rx: mpsc::Receiver<HostMessage>) {
                     &mut slots,
                 );
             }
-            Err(mpsc::RecvTimeoutError::Timeout) => {}
-            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            Err(mpsc::TryRecvError::Empty) => {}
+            Err(mpsc::TryRecvError::Disconnected) => break,
         }
 
         let Some(servo_ref) = servo.as_ref() else {
@@ -493,46 +523,63 @@ fn servo_host_main(cmd_rx: mpsc::Receiver<HostMessage>) {
             }
         }
 
-        let now = Instant::now();
         for slot in slots.values_mut() {
             match slot.cfg.video_send_mode {
                 VideoSendMode::FixedFps => {
-                    let min_dt =
-                        Duration::from_secs_f64(1.0 / slot.cfg.fps.max(1) as f64);
-                    if slot
-                        .last_frame
-                        .map(|t| now.duration_since(t) < min_dt)
-                        .unwrap_or(false)
-                    {
-                        continue;
+                    let min_dt = Duration::from_secs_f64(1.0 / slot.cfg.fps.max(1) as f64);
+                    let prev_deadline = slot.fixed_fps_deadline;
+                    if let Some(d) = prev_deadline {
+                        park_until(d);
                     }
-                    slot.last_frame = Some(now);
-                    let _ = paint_capture_send_ndi(
+                    let paint_res = paint_capture_send_ndi(
                         &slot.runtime,
                         &slot.app,
                         &slot.webview,
                         &slot.rendering_context,
-                        &slot.sender,
+                        &mut slot.sender,
+                        &mut slot.ndi_bgra_buffer,
                         &slot.cfg,
                     );
+                    if let Err(e) = &paint_res {
+                        emit_log_from_worker(
+                            &slot.runtime,
+                            slot.app.clone(),
+                            format!("NDI 送出: {e:#}"),
+                        );
+                    }
+                    advance_fixed_fps_deadline(slot, min_dt, prev_deadline);
                 }
                 VideoSendMode::OnDemand => {
                     if slot.delegate.needs_paint.replace(false) {
-                        slot.last_frame = Some(now);
-                        let _ = paint_capture_send_ndi(
+                        match paint_capture_send_ndi(
                             &slot.runtime,
                             &slot.app,
                             &slot.webview,
                             &slot.rendering_context,
-                            &slot.sender,
+                            &mut slot.sender,
+                            &mut slot.ndi_bgra_buffer,
                             &slot.cfg,
-                        );
+                        ) {
+                            Ok(_) => {}
+                            Err(e) => {
+                                emit_log_from_worker(
+                                    &slot.runtime,
+                                    slot.app.clone(),
+                                    format!("NDI 送出: {e:#}"),
+                                );
+                            }
+                        }
                     }
                 }
             }
         }
 
-        std::thread::sleep(SERVO_HOST_LOOP_SLEEP);
+        let any_fixed_fps = slots
+            .values()
+            .any(|s| matches!(s.cfg.video_send_mode, VideoSendMode::FixedFps));
+        if !any_fixed_fps {
+            std::thread::sleep(SERVO_HOST_LOOP_SLEEP);
+        }
     }
 }
 
@@ -552,7 +599,6 @@ fn remove_finished_streams(
             continue;
         };
         let ActiveStream {
-            stream_index: _,
             cfg,
             stop: _,
             inputs: _,
@@ -563,7 +609,8 @@ fn remove_finished_streams(
             delegate,
             rendering_context,
             sender,
-            last_frame: _,
+            ndi_bgra_buffer: _,
+            fixed_fps_deadline: _,
         } = slot;
 
         let ack_rx = queue_ndi_sender_teardown(sender);
@@ -640,16 +687,11 @@ fn try_add_stream(
     emit_log_from_worker(
         &runtime,
         app.clone(),
-        format!(
-            "Servo WebView を登録しています（ストリーム {} / {}x{}）…",
-            stream_index, w0, h0
-        ),
+        format!("Servo WebView を登録しています（ストリーム {stream_index} / {w0}x{h0}）…",),
     );
 
     let Some(servo_ref) = servo.as_ref() else {
-        let _ = done_tx.send(Err(anyhow::anyhow!(
-            "内部エラー: Servo が未初期化です"
-        )));
+        let _ = done_tx.send(Err(anyhow::anyhow!("内部エラー: Servo が未初期化です")));
         return;
     };
 
@@ -738,7 +780,6 @@ fn try_add_stream(
     slots.insert(
         stream_index,
         ActiveStream {
-            stream_index,
             cfg,
             stop,
             inputs,
@@ -749,22 +790,63 @@ fn try_add_stream(
             delegate: delegate_state,
             rendering_context,
             sender,
-            last_frame: None,
+            ndi_bgra_buffer: Vec::new(),
+            fixed_fps_deadline: None,
         },
     );
 }
 
+/// BGRA 非圧縮 1 フレーム分。`buffer` は `PixelFormat::BGRA` の最小長以上であること。
+fn borrowed_bgra_frame<'a>(
+    buffer: &'a [u8],
+    width: i32,
+    height: i32,
+    frame_rate_n: i32,
+    frame_rate_d: i32,
+) -> anyhow::Result<BorrowedVideoFrame<'a>> {
+    let stride = PixelFormat::BGRA.line_stride(width);
+    let need = PixelFormat::BGRA.info().buffer_len(stride, height);
+    if buffer.len() < need {
+        anyhow::bail!(
+            "BGRA buffer too small: got {}, need {} ({}x{})",
+            buffer.len(),
+            need,
+            width,
+            height
+        );
+    }
+    // SAFETY: `need` は BGRA×解像度のバイト数。上で `buffer` 長を検証済み。
+    Ok(unsafe {
+        BorrowedVideoFrame::from_parts_unchecked(
+            &buffer[..need],
+            width,
+            height,
+            PixelFormat::BGRA,
+            frame_rate_n,
+            frame_rate_d,
+            width as f32 / height.max(1) as f32,
+            ScanType::Progressive,
+            0,
+            LineStrideOrSize::LineStrideBytes(stride),
+            None,
+            0,
+        )
+    })
+}
+
+/// NDI へ実際に 1 映像フレームを送れたら `Ok(true)`。スキップ・エラー時は `Ok(false)`。
 fn paint_capture_send_ndi(
     runtime: &tokio::runtime::Handle,
     app: &AppHandle,
     webview: &WebView,
     rendering_context: &Rc<SoftwareRenderingContext>,
-    sender: &NdiSender,
+    sender: &mut NdiSender,
+    ndi_bgra_buffer: &mut Vec<u8>,
     cfg: &StreamConfig,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<bool> {
     if let Err(e) = rendering_context.make_current() {
         emit_log_from_worker(runtime, app.clone(), format!("make_current: {e:?}"));
-        return Ok(());
+        return Ok(false);
     }
     webview.paint();
     let size = rendering_context.size();
@@ -778,19 +860,38 @@ fn paint_capture_send_ndi(
         let rgba_bytes = rgba_img.into_raw();
         let fps_n = cfg.fps as i32;
         let fps_d = 1_i32;
-        let mut video = VideoFrame::builder()
-            .resolution(out_w as i32, out_h as i32)
-            .pixel_format(PixelFormat::BGRA)
-            .frame_rate(fps_n, fps_d)
-            .aspect_ratio(out_w as f32 / out_h.max(1) as f32)
-            .scan_type(ScanType::Progressive)
-            .build()
-            .context("VideoFrame::build")?;
-        bgra_fill_from_rgba(&mut video.data, &rgba_bytes);
-        sender.send_video(&video);
+        let w = out_w as i32;
+        let h = out_h as i32;
+        let stride = PixelFormat::BGRA.line_stride(w);
+        let need = PixelFormat::BGRA.info().buffer_len(stride, h);
+        if rgba_bytes.len() != need {
+            emit_log_from_worker(
+                runtime,
+                app.clone(),
+                format!(
+                    "read_to_image size mismatch: rgba {} bytes, expected BGRA {} for {}x{}",
+                    rgba_bytes.len(),
+                    need,
+                    out_w,
+                    out_h
+                ),
+            );
+            rendering_context.present();
+            return Ok(false);
+        }
+        ndi_bgra_buffer.resize(need, 0);
+        bgra_fill_from_rgba(ndi_bgra_buffer.as_mut_slice(), &rgba_bytes);
+        let borrowed = borrowed_bgra_frame(ndi_bgra_buffer.as_slice(), w, h, fps_n, fps_d)
+            .context("NDI borrowed frame")?;
+        let token = sender.send_video_async(&borrowed);
+        token
+            .wait()
+            .map_err(|e| anyhow::anyhow!("NDI async video wait: {e}"))?;
+        rendering_context.present();
+        return Ok(true);
     }
     rendering_context.present();
-    Ok(())
+    Ok(false)
 }
 
 fn bgra_fill_from_rgba(dst: &mut [u8], src: &[u8]) {

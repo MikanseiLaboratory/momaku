@@ -65,7 +65,10 @@ async fn compute_engine_status(
     engines: &Arc<Mutex<HashMap<usize, RunningEngine>>>,
     streams_path: &PathBuf,
 ) -> EngineStatusPayload {
-    let n = load_streams(streams_path).await.map(|s| s.len()).unwrap_or(0);
+    let n = load_streams(streams_path)
+        .await
+        .map(|s| s.len())
+        .unwrap_or(0);
     let streams_running = {
         let map = engines.lock().await;
         (0..n).map(|i| map.contains_key(&i)).collect::<Vec<bool>>()
@@ -88,7 +91,9 @@ async fn save_streams(
     streams: Vec<StreamConfig>,
 ) -> Result<(), String> {
     if !state.engines.lock().await.is_empty() {
-        return Err("送出中は設定を保存できません。先にすべてのストリームを停止してください。".into());
+        return Err(
+            "送出中は設定を保存できません。先にすべてのストリームを停止してください。".into(),
+        );
     }
     for s in &streams {
         s.validate().map_err(|e| e.to_string())?;
@@ -116,7 +121,10 @@ async fn get_app_settings(state: State<'_, AppState>) -> Result<AppSettings, Str
 }
 
 #[tauri::command]
-async fn save_app_settings(state: State<'_, AppState>, settings: AppSettings) -> Result<(), String> {
+async fn save_app_settings(
+    state: State<'_, AppState>,
+    settings: AppSettings,
+) -> Result<(), String> {
     settings.validate().map_err(|e| e.to_string())?;
     settings::save_app_settings(&state.settings_path, &settings).await
 }
@@ -184,7 +192,7 @@ async fn start_stream_inner(
             let _ = app_task.emit(
                 "engine-log",
                 EngineLogPayload {
-                    message: format!("ストリーム {index} エラー: {:#}", e),
+                    message: format!("ストリーム {index} エラー: {e:#}"),
                 },
             );
         }
@@ -209,14 +217,17 @@ async fn start_stream_inner(
     }
 
     let st = compute_engine_status(&engines, &streams_path).await;
-    app.emit("engine-status", st)
-        .map_err(|e| e.to_string())?;
+    app.emit("engine-status", st).map_err(|e| e.to_string())?;
 
     Ok(())
 }
 
 #[tauri::command]
-async fn start_stream(app: AppHandle, state: State<'_, AppState>, index: usize) -> Result<(), String> {
+async fn start_stream(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    index: usize,
+) -> Result<(), String> {
     start_stream_inner(
         app,
         state.engines.clone(),
@@ -256,7 +267,11 @@ async fn stop_stream_inner(
 }
 
 #[tauri::command]
-async fn stop_stream(app: AppHandle, state: State<'_, AppState>, index: usize) -> Result<(), String> {
+async fn stop_stream(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    index: usize,
+) -> Result<(), String> {
     stop_stream_inner(
         app,
         state.engines.clone(),
