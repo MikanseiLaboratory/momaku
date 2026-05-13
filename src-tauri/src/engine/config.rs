@@ -1,8 +1,65 @@
-use serde::{Deserialize, Serialize};
+use serde::de::{self, Visitor};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use std::fmt;
 use tauri::Emitter;
 
 fn default_true() -> bool {
     true
+}
+
+fn default_video_send_mode() -> VideoSendMode {
+    VideoSendMode::FixedFps
+}
+
+/// 映像の `paint` と NDI 送出のタイミング（JSON では `"fixedFps"` / `"onDemand"` 文字列）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VideoSendMode {
+    /// ループを FPS で回し、毎ティック `paint` して NDI 送出する。
+    FixedFps,
+    /// Servo が `needs_paint` を立てたときのみ `paint` + 送出する。
+    OnDemand,
+}
+
+impl Serialize for VideoSendMode {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(match self {
+            VideoSendMode::FixedFps => "fixedFps",
+            VideoSendMode::OnDemand => "onDemand",
+        })
+    }
+}
+
+struct VideoSendModeStrVisitor;
+
+impl Visitor<'_> for VideoSendModeStrVisitor {
+    type Value = VideoSendMode;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+        formatter.write_str("\"fixedFps\" or \"onDemand\"")
+    }
+
+    fn visit_str<E>(self, v: &str) -> Result<Self::Value, E>
+    where
+        E: de::Error,
+    {
+        match v {
+            "fixedFps" | "FixedFps" => Ok(VideoSendMode::FixedFps),
+            "onDemand" | "OnDemand" => Ok(VideoSendMode::OnDemand),
+            _ => Err(E::custom(format!("未知の videoSendMode: {v}"))),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for VideoSendMode {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserializer.deserialize_str(VideoSendModeStrVisitor)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -20,6 +77,8 @@ pub struct StreamConfig {
     pub ndi_clock_video: bool,
     #[serde(default = "default_true")]
     pub ndi_clock_audio: bool,
+    #[serde(default = "default_video_send_mode")]
+    pub video_send_mode: VideoSendMode,
 }
 
 impl StreamConfig {
@@ -60,4 +119,16 @@ pub struct EngineStatusPayload {
 
 pub(crate) fn emit_log(app: &tauri::AppHandle, message: String) -> tauri::Result<()> {
     app.emit("engine-log", EngineLogPayload { message })
+}
+
+/// Servo 用 **std::thread** から `emit` するとメインスレッド待ちでデッドロックし得るため、
+/// Tokio ランタイム上で非同期に送る（失敗時は `tracing` のみ）。
+pub(crate) fn emit_log_from_worker(
+    runtime: &tokio::runtime::Handle,
+    app: tauri::AppHandle,
+    message: String,
+) {
+    let _ = runtime.spawn(async move {
+        let _ = emit_log(&app, message);
+    });
 }

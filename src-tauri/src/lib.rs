@@ -1,12 +1,15 @@
 mod engine;
+mod settings;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock, Mutex as StdMutex};
 
 use engine::{EngineLogPayload, EngineStatusPayload, InputQueue, StreamConfig};
+use settings::AppSettings;
 use tauri::{AppHandle, Emitter, Manager, State};
-use tokio::sync::{watch, Mutex};
+use tokio::sync::Mutex;
 
 /// 送出中ストリーム index → 入力キュー（`submit_remote_input` が参照）
 static ENGINE_INPUTS: LazyLock<StdMutex<HashMap<usize, InputQueue>>> =
@@ -27,12 +30,14 @@ pub fn unregister_stream_input(index: usize) {
 }
 
 pub struct RunningEngine {
-    pub shutdown_tx: watch::Sender<bool>,
+    /// Servo スレッドへ停止を伝える（`stop_stream` が `true` にする）。
+    pub stop: Arc<AtomicBool>,
     pub join: tokio::task::JoinHandle<()>,
 }
 
 pub struct AppState {
     pub streams_path: PathBuf,
+    pub settings_path: PathBuf,
     pub engines: Arc<Mutex<HashMap<usize, RunningEngine>>>,
 }
 
@@ -45,8 +50,9 @@ async fn load_streams(path: &PathBuf) -> Result<Vec<StreamConfig>, String> {
             height: 720,
             fps: 30,
             ndi_groups: None,
-            ndi_clock_video: true,
-            ndi_clock_audio: true,
+            ndi_clock_video: false,
+            ndi_clock_audio: false,
+            video_send_mode: engine::VideoSendMode::FixedFps,
         }]);
     }
     let t = tokio::fs::read_to_string(path)
@@ -104,6 +110,28 @@ async fn get_engine_running(state: State<'_, AppState>) -> Result<EngineStatusPa
     Ok(compute_engine_status(&state.engines, &state.streams_path).await)
 }
 
+#[tauri::command]
+async fn get_app_settings(state: State<'_, AppState>) -> Result<AppSettings, String> {
+    Ok(settings::load_app_settings(&state.settings_path).await)
+}
+
+#[tauri::command]
+async fn save_app_settings(state: State<'_, AppState>, settings: AppSettings) -> Result<(), String> {
+    settings.validate().map_err(|e| e.to_string())?;
+    settings::save_app_settings(&state.settings_path, &settings).await
+}
+
+/// ブラウザで https URL を開く（About 等）。
+#[tauri::command]
+fn open_external_url(url: String) -> Result<(), String> {
+    let u = url::Url::parse(&url).map_err(|e| e.to_string())?;
+    if u.scheme() != "https" {
+        return Err("https の URL のみ開けます".into());
+    }
+    opener::open(url).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 /// 付属ビューア等からのリモート操作（当該ストリームが送出中のときのみ有効）。
 #[tauri::command]
 fn submit_remote_input(input: engine::RemoteInput) -> Result<(), String> {
@@ -124,6 +152,7 @@ async fn start_stream_inner(
     app: AppHandle,
     engines: Arc<Mutex<HashMap<usize, RunningEngine>>>,
     streams_path: PathBuf,
+    settings_path: PathBuf,
     index: usize,
 ) -> Result<(), String> {
     let streams = load_streams(&streams_path).await?;
@@ -139,14 +168,18 @@ async fn start_stream_inner(
         }
     }
 
+    let app_settings = settings::load_app_settings(&settings_path).await;
+    let mut cfg = cfg.clone();
+    cfg.ndi_groups = settings::effective_ndi_groups_for_stream(&cfg.ndi_groups, &app_settings);
+
     let engines_slot = engines.clone();
     let streams_path_bg = streams_path.clone();
     let app_task = app.clone();
-    let cfg = cfg.clone();
-    let (shutdown_tx, shutdown_rx) = watch::channel(false);
-
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_for_stream = stop.clone();
+    let stop_for_cleanup = stop.clone();
     let join = tokio::spawn(async move {
-        let res = engine::run_single_stream(index, cfg, app_task.clone(), shutdown_rx).await;
+        let res = engine::run_single_stream(index, cfg, app_task.clone(), stop_for_stream).await;
         if let Err(e) = res {
             let _ = app_task.emit(
                 "engine-log",
@@ -154,6 +187,10 @@ async fn start_stream_inner(
                     message: format!("ストリーム {index} エラー: {:#}", e),
                 },
             );
+        }
+        // 外部停止（stop_stream_inner）の場合、呼び出し側がクリーンアップを行うためスキップ
+        if stop_for_cleanup.load(Ordering::Acquire) {
+            return;
         }
         engines_slot.lock().await.remove(&index);
         let st = compute_engine_status(&engines_slot, &streams_path_bg).await;
@@ -165,7 +202,7 @@ async fn start_stream_inner(
         map.insert(
             index,
             RunningEngine {
-                shutdown_tx,
+                stop: stop.clone(),
                 join,
             },
         );
@@ -184,6 +221,7 @@ async fn start_stream(app: AppHandle, state: State<'_, AppState>, index: usize) 
         app,
         state.engines.clone(),
         state.streams_path.clone(),
+        state.settings_path.clone(),
         index,
     )
     .await
@@ -202,15 +240,18 @@ async fn stop_stream_inner(
     let Some(r) = running else {
         return Err("この行は送出中ではありません".into());
     };
-    let _ = r.shutdown_tx.send(true);
-    tokio::time::timeout(std::time::Duration::from_secs(45), r.join)
-        .await
+    r.stop.store(true, Ordering::SeqCst);
+    let join_res = tokio::time::timeout(std::time::Duration::from_secs(45), r.join).await;
+
+    // エンジンのエントリは既に map から除去済みなので、join がタイムアウト・エラーでも
+    // フロントエンドに最新ステータスを必ず届ける（UI が「送出中」のまま固まるのを防ぐ）。
+    let st = compute_engine_status(&engines, &streams_path).await;
+    let _ = app.emit("engine-status", st);
+
+    join_res
         .map_err(|_| "停止がタイムアウトしました".to_string())?
         .map_err(|e| format!("タスク終了: {e}"))?;
 
-    let st = compute_engine_status(&engines, &streams_path).await;
-    app.emit("engine-status", st)
-        .map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -234,11 +275,19 @@ async fn start_outputs(app: AppHandle, state: State<'_, AppState>) -> Result<(),
     let n = streams.len();
     let engines = state.engines.clone();
     let path = state.streams_path.clone();
+    let settings_path = state.settings_path.clone();
     for i in 0..n {
         if engines.lock().await.contains_key(&i) {
             continue;
         }
-        start_stream_inner(app.clone(), engines.clone(), path.clone(), i).await?;
+        start_stream_inner(
+            app.clone(),
+            engines.clone(),
+            path.clone(),
+            settings_path.clone(),
+            i,
+        )
+        .await?;
     }
     Ok(())
 }
@@ -285,8 +334,10 @@ pub fn run() {
                 .to_path_buf();
             std::fs::create_dir_all(&dir).expect("create_dir_all config");
             let streams_path = dir.join("streams.json");
+            let settings_path = dir.join("settings.json");
             app.manage(AppState {
                 streams_path,
+                settings_path,
                 engines: Arc::new(Mutex::new(HashMap::new())),
             });
             Ok(())
@@ -295,6 +346,9 @@ pub fn run() {
             get_streams,
             save_streams,
             get_engine_running,
+            get_app_settings,
+            save_app_settings,
+            open_external_url,
             submit_remote_input,
             start_stream,
             stop_stream,
