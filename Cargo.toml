@@ -1,3 +1,7 @@
 [workspace]
 members = ["src-tauri"]
 resolver = "2"
+
+[patch.crates-io]
+# https://github.com/FlowingSPDG/grafton-ndi/commit/753fa107880e40d5c98ac0f0aad499783868c665
+grafton-ndi = { git = "https://github.com/FlowingSPDG/grafton-ndi.git", rev = "753fa107880e40d5c98ac0f0aad499783868c665" }
