@@ -11,6 +11,7 @@
     "tauri:dev:win": "pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/tauri-dev-windows.ps1",
     "tauri:clippy:win": "pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/tauri-clippy-windows.ps1",
     "tauri:build:win": "pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/tauri-build-windows.ps1",
+    "tauri:release:win": "pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/tauri-release-windows.ps1",
     "tauri:dev:mac": "bash scripts/tauri-dev-mac.sh",
     "tauri:build:mac": "bash scripts/tauri-build-mac.sh"
   },

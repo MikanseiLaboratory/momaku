@@ -21,7 +21,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.88
+
+      - name: MSVC (mozangle / Servo)
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
 
       - uses: actions/setup-node@v4
         with:
@@ -36,6 +43,22 @@ jobs:
         run: |
           $llvm = "C:\Program Files\LLVM\bin"
           if (Test-Path $llvm) { Add-Content $env:GITHUB_PATH $llvm }
+
+      # Same as `ci.yml` Windows job — mozangle bindgen needs libclang + MSVC system includes
+      - name: Bindgen / libclang env for MSVC includes
+        shell: pwsh
+        run: |
+          $llvmBin = "C:\Program Files\LLVM\bin"
+          if (Test-Path (Join-Path $llvmBin "libclang.dll")) {
+            "LIBCLANG_PATH=$llvmBin" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          }
+          if ($env:INCLUDE) {
+            $parts = $env:INCLUDE -split ';' | ForEach-Object { $_.Trim() } | Where-Object { $_ -and (Test-Path $_) }
+            if ($parts.Count -gt 0) {
+              $clangArgs = ($parts | ForEach-Object { "-isystem `"$_`"" }) -join ' '
+              "BINDGEN_EXTRA_CLANG_ARGS=$clangArgs" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+            }
+          }
 
       - run: npm ci
 
@@ -58,7 +81,7 @@ jobs:
             exit 1
           }
 
-      - uses: tauri-apps/tauri-action@v2
+      - uses: tauri-apps/tauri-action@v0.6.2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
