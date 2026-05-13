@@ -1,0 +1,7 @@
+{
+  "bundle": {
+    "targets": ["dmg"],
+    "icon": ["icons/icon.icns"],
+    "createUpdaterArtifacts": false
+  }
+}

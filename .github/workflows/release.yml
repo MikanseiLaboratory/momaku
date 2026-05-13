@@ -14,9 +14,24 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - platform: windows-latest
+          - runner: windows-latest
+            ndi: windows
+            tauri_args: "--verbose --config bundle-with-updater.conf.json"
+            include_updater_json: "true"
+          - runner: macos-15
+            ndi: macos
+            tauri_args: "--verbose --config bundle-with-updater.conf.json --config bundle-release-macos.json"
+            include_updater_json: "false"
+          - runner: macos-13
+            ndi: macos
+            tauri_args: "--verbose --config bundle-with-updater.conf.json --config bundle-release-macos.json"
+            include_updater_json: "false"
+          - runner: ubuntu-24.04
+            ndi: linux
+            tauri_args: "--verbose --config bundle-with-updater.conf.json --config bundle-release-linux.json"
+            include_updater_json: "false"
 
-    runs-on: ${{ matrix.platform }}
+    runs-on: ${{ matrix.runner }}
 
     steps:
       - uses: actions/checkout@v4
@@ -25,7 +40,23 @@ jobs:
         with:
           toolchain: 1.88
 
+      - name: Linux — build dependencies (Tauri / GTK / WebKit)
+        if: matrix.ndi == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config clang libssl-dev curl wget file \
+            libgtk-3-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf \
+            libxdo-dev libfuse2
+
+      - name: macOS — LLVM (bindgen)
+        if: matrix.ndi == 'macos'
+        run: |
+          brew install llvm
+          echo "LIBCLANG_PATH=$(brew --prefix llvm)/lib" >> "$GITHUB_ENV"
+
       - name: MSVC (mozangle / Servo)
+        if: matrix.ndi == 'windows'
         uses: ilammy/msvc-dev-cmd@v1
         with:
           arch: x64
@@ -35,17 +66,19 @@ jobs:
           node-version: 22
           cache: npm
 
-      - name: Install LLVM (bindgen / grafton-ndi)
+      - name: Install LLVM (bindgen / grafton-ndi) — Windows
+        if: matrix.ndi == 'windows'
         run: choco install llvm -y --no-progress
 
-      - name: Add LLVM to PATH
+      - name: Add LLVM to PATH — Windows
+        if: matrix.ndi == 'windows'
         shell: pwsh
         run: |
           $llvm = "C:\Program Files\LLVM\bin"
           if (Test-Path $llvm) { Add-Content $env:GITHUB_PATH $llvm }
 
-      # Same as `ci.yml` Windows job — mozangle bindgen needs libclang + MSVC system includes
-      - name: Bindgen / libclang env for MSVC includes
+      - name: Bindgen / libclang env for MSVC includes — Windows
+        if: matrix.ndi == 'windows'
         shell: pwsh
         run: |
           $llvmBin = "C:\Program Files\LLVM\bin"
@@ -60,26 +93,25 @@ jobs:
             }
           }
 
+      - name: Setup NDI SDK
+        uses: ./.github/actions/setup-ndi-sdk
+        with:
+          platform: ${{ matrix.ndi }}
+          linux_url: ${{ secrets.NDI_SDK_LINUX_URL }}
+          macos_url: ${{ secrets.NDI_SDK_MACOS_URL }}
+          windows_url: ${{ secrets.NDI_SDK_WINDOWS_URL }}
+
       - run: npm ci
 
-      - name: Require NDI 6 SDK
-        shell: pwsh
-        run: |
-          $ndi = Join-Path ${env:ProgramFiles} "NDI\NDI 6 SDK"
-          if (-not (Test-Path $ndi)) {
-            Write-Host "::error::NDI 6 SDK not found at $ndi. Install it on the runner or use a self-hosted Windows agent with the SDK."
-            exit 1
-          }
-
       - name: Require TAURI_SIGNING_PRIVATE_KEY
-        shell: pwsh
+        shell: bash
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
         run: |
-          if ([string]::IsNullOrWhiteSpace($env:TAURI_SIGNING_PRIVATE_KEY)) {
-            Write-Host "::error::Set repository secret TAURI_SIGNING_PRIVATE_KEY (minisign private key, same pair as pubkey in tauri.conf.json)."
+          if [ -z "${TAURI_SIGNING_PRIVATE_KEY:-}" ]; then
+            echo "::error::Set repository secret TAURI_SIGNING_PRIVATE_KEY (minisign private key, same pair as pubkey in tauri.conf.json)."
             exit 1
-          }
+          fi
 
       - uses: tauri-apps/tauri-action@v0.6.2
         env:
@@ -90,7 +122,11 @@ jobs:
           projectPath: src-tauri
           tagName: ${{ github.ref_name }}
           releaseName: "momaku ${{ github.ref_name }}"
-          releaseBody: "Signed installer and updater metadata (latest.json). See [README](https://github.com/MikanseiLaboratory/momaku#github-actions) for CI, secrets, and the auto updater."
+          releaseBody: |
+            Signed installers for **Windows**, **macOS** (Apple Silicon + Intel), and **Ubuntu** (deb + AppImage).
+            The **latest.json** updater artifact is uploaded from the Windows matrix row only (single-platform updater JSON).
+            Linux NDI SDK is fetched automatically in CI (same pattern as [DistroAV `CI/libndi-get.sh`](https://github.com/DistroAV/DistroAV/blob/master/CI/libndi-get.sh)). If macOS/Windows downloads from `downloads.ndi.tv` fail on the runner, set optional secrets **NDI_SDK_MACOS_URL** / **NDI_SDK_WINDOWS_URL** (direct archive URLs).
           releaseDraft: true
           prerelease: false
-          args: --verbose --config bundle-with-updater.conf.json
+          includeUpdaterJson: ${{ matrix.include_updater_json == 'true' }}
+          args: ${{ matrix.tauri_args }}
