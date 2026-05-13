@@ -1,19 +1,27 @@
-NDI(R) SDK v6 — vendored subset for Windows CI and offline builds
-==================================================================
+NDI(R) SDK v6 — vendored build layout (Windows, Linux, macOS)
+=============================================================
 
-This directory contains header files and the x64 static import library
-(Processing.NDI.Lib.x64.lib) from the NDI 6 SDK, in the layout expected by
-grafton-ndi (include/, lib/x64/).
+This directory is the unified NDI_SDK_DIR for grafton-ndi: include/, lib/x64/,
+lib/x86_64-linux-gnu/, lib/macOS/.
 
-Distribution: Per Vizrt NDI documentation, NDI SDK header files may be
-included in open-source distributions; see:
-https://docs.ndi.video/all/developing-with-ndi/sdk/software-distribution
-and the NDI SDK License Agreement supplied with the SDK
-("NDI SDK License Agreement.pdf").
+How to refresh (maintainers)
+----------------------------
+From a Windows machine with the official v6 installers in one folder (e.g.
+``NDI 6 SDK.exe``, ``Install_NDI_SDK_v6_Linux.tar.gz``,
+``Install_NDI_SDK_v6_Apple.pkg``), run:
 
-Trademark: NDI(R) is a registered trademark of Vizrt NDI AB.
+  pwsh -File scripts/vendor-ndi-sdk-from-local.ps1 -SourceDir <path-to-folder>
 
-Runtime: End users still need the NDI runtime / redistributable as described
-in the NDI SDK documentation; this repository does not replace the full SDK
-installer for Linux or macOS builds (those platforms continue to resolve the
-SDK in CI via .github/actions/setup-ndi-sdk).
+Linux files are produced via WSL (``yes | sh`` on the Linux installer).
+macOS ``libndi.dylib`` is extracted from the Apple .pkg using ``tar`` on Windows.
+
+Distribution and compliance
+---------------------------
+- Header files: NDI documentation allows including SDK headers in open-source
+  distributions; see https://docs.ndi.video/all/developing-with-ndi/sdk/software-distribution
+- Libraries: follow the NDI SDK License Agreement supplied with the SDK and
+  your product’s obligations for runtime/redistributables and trademarks.
+- NDI(R) is a registered trademark of Vizrt NDI AB.
+
+CI does not download the SDK; ``.github/actions/setup-ndi-sdk`` only points
+NDI_SDK_DIR here and, on Linux, recreates ``libndi.so`` symlinks for the linker.

@@ -1,46 +1,21 @@
-name: Setup NDI SDK
+name: Setup NDI SDK (vendored)
 description: >
-  Resolves NDI 6 SDK for CI builds. Windows uses third_party/ndi-sdk-6 when present; otherwise
-  downloads the official zip (optional NDI_SDK_WINDOWS_URL). Linux follows DistroAV (downloads.ndi.tv).
-  macOS uses the official tarball (optional NDI_SDK_MACOS_URL).
+  Sets NDI_SDK_DIR to third_party/ndi-sdk-6 only (no downloads, no secrets). On Linux, recreates
+  libndi.so symlinks for grafton-ndi. Refresh the tree with scripts/vendor-ndi-sdk-from-local.ps1.
 inputs:
   platform:
     description: "linux | macos | windows"
     required: true
-  linux_url:
-    description: Optional override for Linux SDK tarball URL
-    required: false
-    default: ""
-  macos_url:
-    description: Optional override for macOS SDK archive URL (.tar.gz)
-    required: false
-    default: ""
-  windows_url:
-    description: Optional override for Windows SDK archive URL (.zip with include/ + lib/)
-    required: false
-    default: ""
 
 runs:
   using: composite
   steps:
-    - name: NDI SDK (Linux)
-      if: inputs.platform == 'linux'
-      shell: bash
-      env:
-        NDI_SDK_LINUX_URL: ${{ inputs.linux_url }}
-      run: bash "${{ github.action_path }}/install-linux.sh"
-
-    - name: NDI SDK (macOS)
-      if: inputs.platform == 'macos'
-      shell: bash
-      env:
-        NDI_SDK_MACOS_URL: ${{ inputs.macos_url }}
-      run: bash "${{ github.action_path }}/install-macos.sh"
-
     - name: NDI SDK (Windows)
       if: inputs.platform == 'windows'
       shell: pwsh
-      env:
-        NDI_SDK_WINDOWS_URL: ${{ inputs.windows_url }}
-      run: |
-        & "${{ github.action_path }}/install-windows.ps1"
+      run: pwsh -NoProfile -File "${{ github.action_path }}/setup-vendored.ps1"
+
+    - name: NDI SDK (Linux / macOS)
+      if: inputs.platform != 'windows'
+      shell: bash
+      run: bash "${{ github.action_path }}/setup-vendored.sh"

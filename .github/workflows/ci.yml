@@ -88,51 +88,16 @@ jobs:
 
       - run: npm ci
 
-      - name: Setup NDI SDK (Windows)
-        id: ndi_setup
+      - name: Setup NDI SDK (vendored)
         uses: ./.github/actions/setup-ndi-sdk
         with:
           platform: windows
-          windows_url: ${{ secrets.NDI_SDK_WINDOWS_URL }}
-
-      - name: Detect NDI SDK
-        id: ndi
-        shell: pwsh
-        run: |
-          $has = $false
-          if ($env:NDI_SDK_DIR -and (Test-Path (Join-Path $env:NDI_SDK_DIR 'include'))) {
-            $has = $true
-            Write-Host "NDI_SDK_DIR=$env:NDI_SDK_DIR"
-          } else {
-            $ndi = Join-Path ${env:ProgramFiles} "NDI\NDI 6 SDK"
-            if (Test-Path $ndi) {
-              $has = $true
-              Write-Host "NDI SDK found at $ndi"
-            }
-          }
-          if ($has) {
-            "has_ndi=true" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
-          } else {
-            "has_ndi=false" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
-            if ('${{ steps.ndi_setup.outcome }}' -eq 'failure') {
-              Write-Host "::warning::NDI SDK setup failed and no SDK in Program Files. Ensure third_party/ndi-sdk-6 is present, set NDI_SDK_WINDOWS_URL, or install NDI 6 SDK on the runner."
-            } else {
-              Write-Host "::warning::NDI 6 SDK not found. Use repo third_party/ndi-sdk-6, install from https://ndi.video/type/developer/, or set NDI_SDK_WINDOWS_URL."
-            }
-          }
 
       - name: cargo test
-        if: steps.ndi.outputs.has_ndi == 'true'
         run: cargo test -p momaku --locked
 
       - name: cargo clippy
-        if: steps.ndi.outputs.has_ndi == 'true'
         run: cargo clippy -p momaku --all-targets --all-features --locked -- -D warnings
 
       - name: cargo build (release)
-        if: steps.ndi.outputs.has_ndi == 'true'
         run: cargo build -p momaku --release --locked
-
-      - name: Skip native build without NDI SDK
-        if: steps.ndi.outputs.has_ndi != 'true'
-        run: echo "Skipping cargo test/build without NDI SDK on this runner."
