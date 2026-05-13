@@ -96,6 +96,13 @@ jobs:
         with:
           platform: ${{ matrix.ndi }}
 
+      - name: NDI on LD_LIBRARY_PATH (linuxdeploy / deb shlibs)
+        if: matrix.ndi == 'linux'
+        run: |
+          NDI_LIB="${GITHUB_WORKSPACE}/third_party/ndi-sdk-6/lib/x86_64-linux-gnu"
+          echo "LD_LIBRARY_PATH=${NDI_LIB}:${LD_LIBRARY_PATH:-}" >> "${GITHUB_ENV}"
+          ls -la "${NDI_LIB}"
+
       - run: npm ci
 
       - name: Require TAURI_SIGNING_PRIVATE_KEY

@@ -1,6 +1,22 @@
 {
   "bundle": {
     "targets": ["deb", "appimage"],
-    "icon": ["icons/128x128.png", "icons/icon.png"]
+    "icon": ["icons/128x128.png", "icons/icon.png"],
+    "linux": {
+      "appimage": {
+        "files": {
+          "/usr/lib/libndi.so": "../third_party/ndi-sdk-6/lib/x86_64-linux-gnu/libndi.so.6.3.2",
+          "/usr/lib/libndi.so.6": "../third_party/ndi-sdk-6/lib/x86_64-linux-gnu/libndi.so.6.3.2",
+          "/usr/lib/libndi.so.6.3.2": "../third_party/ndi-sdk-6/lib/x86_64-linux-gnu/libndi.so.6.3.2"
+        }
+      },
+      "deb": {
+        "files": {
+          "/usr/lib/libndi.so": "../third_party/ndi-sdk-6/lib/x86_64-linux-gnu/libndi.so.6.3.2",
+          "/usr/lib/libndi.so.6": "../third_party/ndi-sdk-6/lib/x86_64-linux-gnu/libndi.so.6.3.2",
+          "/usr/lib/libndi.so.6.3.2": "../third_party/ndi-sdk-6/lib/x86_64-linux-gnu/libndi.so.6.3.2"
+        }
+      }
+    }
   }
 }
