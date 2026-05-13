@@ -1,8 +1,8 @@
 //! # Servo埋め込み
 //!
-//! - **クレート**: 公式 [`servo`](https://crates.io/crates/servo) **0.1**（`default-features = false` + `no-wgl`）。
+//! - **クレート**: 公式 [`servo`](https://crates.io/crates/servo) **0.1**（`default-features = false`）。**Windows のみ** `no-wgl`（mozangle EGL DLL 経路）。Linux/macOS では `mozangle` の EGL が未サポートのため付与しない。
 //! - **Windows**: **Visual Studio C++ ビルドツール**（`mozangle`）が必要。Developer PowerShellまたはCIの`ilammy/msvc-dev-cmd`を参照。
-//! - **Linux / macOS**: 本リポジトリのCIはWindowsネイティブ中心。他OSはローカルで`cargo check`を確認してください。
+//! - **Linux / macOS**: `mozangle` は WGL/EGL の Windows 専用パスを除いたビルド。LLVM（bindgen）が必要な場合があります。
 
 mod config;
 mod input;

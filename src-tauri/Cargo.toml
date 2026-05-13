@@ -31,12 +31,6 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 grafton-ndi = { version = "0.11", features = ["tokio"] }
 
-servo = { version = "0.1", default-features = false, features = [
-    "baked-in-resources",
-    "clipboard",
-    "js_jit",
-    "no-wgl",
-] }
 dpi = "0.1"
 euclid = "0.22"
 url = "2"
@@ -47,6 +41,22 @@ rustls = { version = "0.23", default-features = true }
 
 tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
+
+# `no-wgl` pulls mozangle/egl + build_dlls, which mozangle only supports on Windows (see mozangle build.rs).
+[target.'cfg(windows)'.dependencies]
+servo = { version = "0.1", default-features = false, features = [
+    "baked-in-resources",
+    "clipboard",
+    "js_jit",
+    "no-wgl",
+] }
+
+[target.'cfg(not(windows))'.dependencies]
+servo = { version = "0.1", default-features = false, features = [
+    "baked-in-resources",
+    "clipboard",
+    "js_jit",
+] }
 
 [[example]]
 name = "servo_smoke"
