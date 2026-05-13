@@ -1,18 +1,28 @@
 mod engine;
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex as StdMutex};
 
-use engine::input::InputQueue;
-use engine::{EngineLogPayload, EngineStatusPayload, StreamConfig};
+use engine::{EngineLogPayload, EngineStatusPayload, InputQueue, StreamConfig};
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::{watch, Mutex};
 
-/// Servo エンジン稼働中のみ `Some`。`submit_remote_input` が参照します。
-static ENGINE_INPUT: StdMutex<Option<InputQueue>> = StdMutex::new(None);
+/// 送出中ストリームindex→入力キュー（`submit_remote_input`が参照）
+static ENGINE_INPUTS: StdMutex<HashMap<usize, InputQueue>> = StdMutex::new(HashMap::new());
 
-pub fn set_engine_input_queue(q: Option<InputQueue>) {
-    *ENGINE_INPUT.lock().expect("ENGINE_INPUT lock poisoned") = q;
+pub fn register_stream_input(index: usize, q: InputQueue) {
+    ENGINE_INPUTS
+        .lock()
+        .expect("ENGINE_INPUTS lock poisoned")
+        .insert(index, q);
+}
+
+pub fn unregister_stream_input(index: usize) {
+    ENGINE_INPUTS
+        .lock()
+        .expect("ENGINE_INPUTS lock poisoned")
+        .remove(&index);
 }
 
 pub struct RunningEngine {
@@ -22,7 +32,7 @@ pub struct RunningEngine {
 
 pub struct AppState {
     pub streams_path: PathBuf,
-    pub engine: Arc<Mutex<Option<RunningEngine>>>,
+    pub engines: Arc<Mutex<HashMap<usize, RunningEngine>>>,
 }
 
 async fn load_streams(path: &PathBuf) -> Result<Vec<StreamConfig>, String> {
@@ -33,12 +43,31 @@ async fn load_streams(path: &PathBuf) -> Result<Vec<StreamConfig>, String> {
             width: 1280,
             height: 720,
             fps: 30,
+            ndi_groups: None,
+            ndi_clock_video: true,
+            ndi_clock_audio: true,
         }]);
     }
     let t = tokio::fs::read_to_string(path)
         .await
         .map_err(|e| format!("設定読込: {e}"))?;
     serde_json::from_str(&t).map_err(|e| format!("JSON: {e}"))
+}
+
+async fn compute_engine_status(
+    engines: &Arc<Mutex<HashMap<usize, RunningEngine>>>,
+    streams_path: &PathBuf,
+) -> EngineStatusPayload {
+    let n = load_streams(streams_path).await.map(|s| s.len()).unwrap_or(0);
+    let streams_running = {
+        let map = engines.lock().await;
+        (0..n).map(|i| map.contains_key(&i)).collect::<Vec<bool>>()
+    };
+    let running = streams_running.iter().any(|&x| x);
+    EngineStatusPayload {
+        running,
+        streams_running,
+    }
 }
 
 #[tauri::command]
@@ -51,6 +80,9 @@ async fn save_streams(
     state: State<'_, AppState>,
     streams: Vec<StreamConfig>,
 ) -> Result<(), String> {
+    if !state.engines.lock().await.is_empty() {
+        return Err("送出中は設定を保存できません。先にすべてのストリームを停止してください。".into());
+    }
     for s in &streams {
         s.validate().map_err(|e| e.to_string())?;
     }
@@ -67,18 +99,18 @@ async fn save_streams(
 }
 
 #[tauri::command]
-async fn get_engine_running(state: State<'_, AppState>) -> Result<bool, String> {
-    Ok(state.engine.lock().await.is_some())
+async fn get_engine_running(state: State<'_, AppState>) -> Result<EngineStatusPayload, String> {
+    Ok(compute_engine_status(&state.engines, &state.streams_path).await)
 }
 
-/// 付属ビューア等からのリモート操作（エンジン稼働中のみ有効）。
+/// 付属ビューア等からのリモート操作（当該ストリームが送出中のときのみ有効）。
 #[tauri::command]
 fn submit_remote_input(input: engine::RemoteInput) -> Result<(), String> {
-    let g = ENGINE_INPUT
+    let g = ENGINE_INPUTS
         .lock()
         .map_err(|_| "入力キューがロックできません".to_string())?;
-    let Some(q) = g.as_ref() else {
-        return Err("エンジン停止中は入力を受け付けません".into());
+    let Some(q) = g.get(&input.stream_index) else {
+        return Err("該当ストリームは送出中ではないため入力を受け付けません".into());
     };
     let mut inner = q
         .lock()
@@ -87,73 +119,146 @@ fn submit_remote_input(input: engine::RemoteInput) -> Result<(), String> {
     Ok(())
 }
 
-#[tauri::command]
-async fn start_outputs(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
-    let streams = load_streams(&state.streams_path).await?;
-    if streams.is_empty() {
-        return Err("ストリームが1件以上必要です".into());
-    }
-    for s in &streams {
-        s.validate().map_err(|e| e.to_string())?;
-    }
-    StreamConfig::validate_servo_bundle(&streams).map_err(|e| e.to_string())?;
+async fn start_stream_inner(
+    app: AppHandle,
+    engines: Arc<Mutex<HashMap<usize, RunningEngine>>>,
+    streams_path: PathBuf,
+    index: usize,
+) -> Result<(), String> {
+    let streams = load_streams(&streams_path).await?;
+    let Some(cfg) = streams.get(index) else {
+        return Err(format!("ストリーム {index} が存在しません"));
+    };
+    cfg.validate().map_err(|e| e.to_string())?;
 
-    let mut g = state.engine.lock().await;
-    if g.is_some() {
-        return Err("既に送出中です".into());
+    {
+        let map = engines.lock().await;
+        if map.contains_key(&index) {
+            return Err("この行は既に送出中です".into());
+        }
     }
 
+    let engines_slot = engines.clone();
+    let streams_path_bg = streams_path.clone();
+    let app_task = app.clone();
+    let cfg = cfg.clone();
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
-    let engine_slot = state.engine.clone();
-    let app_task = app.clone();
-
-    let task = tokio::spawn(async move {
-        let res = engine::run_all(streams, app_task.clone(), shutdown_rx).await;
+    let join = tokio::spawn(async move {
+        let res = engine::run_single_stream(index, cfg, app_task.clone(), shutdown_rx).await;
         if let Err(e) = res {
             let _ = app_task.emit(
                 "engine-log",
                 EngineLogPayload {
-                    message: format!("エンジンエラー: {:#}", e),
+                    message: format!("ストリーム {index} エラー: {:#}", e),
                 },
             );
         }
-        let mut slot = engine_slot.lock().await;
-        *slot = None;
-        let _ = app_task.emit("engine-status", EngineStatusPayload { running: false });
+        engines_slot.lock().await.remove(&index);
+        let st = compute_engine_status(&engines_slot, &streams_path_bg).await;
+        let _ = app_task.emit("engine-status", st);
     });
 
-    *g = Some(RunningEngine {
-        shutdown_tx,
-        join: task,
-    });
-    drop(g);
+    {
+        let mut map = engines.lock().await;
+        map.insert(
+            index,
+            RunningEngine {
+                shutdown_tx,
+                join,
+            },
+        );
+    }
 
-    app.emit("engine-status", EngineStatusPayload { running: true })
+    let st = compute_engine_status(&engines, &streams_path).await;
+    app.emit("engine-status", st)
         .map_err(|e| e.to_string())?;
 
     Ok(())
 }
 
 #[tauri::command]
-async fn stop_outputs(state: State<'_, AppState>) -> Result<(), String> {
+async fn start_stream(app: AppHandle, state: State<'_, AppState>, index: usize) -> Result<(), String> {
+    start_stream_inner(
+        app,
+        state.engines.clone(),
+        state.streams_path.clone(),
+        index,
+    )
+    .await
+}
+
+async fn stop_stream_inner(
+    app: AppHandle,
+    engines: Arc<Mutex<HashMap<usize, RunningEngine>>>,
+    streams_path: PathBuf,
+    index: usize,
+) -> Result<(), String> {
     let running = {
-        let mut g = state.engine.lock().await;
-        g.take()
+        let mut map = engines.lock().await;
+        map.remove(&index)
     };
     let Some(r) = running else {
-        return Ok(());
+        return Err("この行は送出中ではありません".into());
     };
     let _ = r.shutdown_tx.send(true);
     tokio::time::timeout(std::time::Duration::from_secs(45), r.join)
         .await
         .map_err(|_| "停止がタイムアウトしました".to_string())?
         .map_err(|e| format!("タスク終了: {e}"))?;
+
+    let st = compute_engine_status(&engines, &streams_path).await;
+    app.emit("engine-status", st)
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+async fn stop_stream(app: AppHandle, state: State<'_, AppState>, index: usize) -> Result<(), String> {
+    stop_stream_inner(
+        app,
+        state.engines.clone(),
+        state.streams_path.clone(),
+        index,
+    )
+    .await
+}
+
+#[tauri::command]
+async fn start_outputs(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+    let streams = load_streams(&state.streams_path).await?;
+    if streams.is_empty() {
+        return Err("ストリームが1件以上必要です".into());
+    }
+    let n = streams.len();
+    let engines = state.engines.clone();
+    let path = state.streams_path.clone();
+    for i in 0..n {
+        if engines.lock().await.contains_key(&i) {
+            continue;
+        }
+        start_stream_inner(app.clone(), engines.clone(), path.clone(), i).await?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn stop_outputs(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+    let keys: Vec<usize> = state.engines.lock().await.keys().copied().collect();
+    let engines = state.engines.clone();
+    let path = state.streams_path.clone();
+    for k in keys {
+        let _ = stop_stream_inner(app.clone(), engines.clone(), path.clone(), k).await;
+    }
     Ok(())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // rustls 0.23: `ring`と`aws_lc_rs`が併用されると既定CryptoProviderが決まらない。
+    // 他クレートより先にaws-lc-rsを選ぶ（既に設定済みなら二重呼び出しは無視する）。
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
@@ -181,7 +286,7 @@ pub fn run() {
             let streams_path = dir.join("streams.json");
             app.manage(AppState {
                 streams_path,
-                engine: Arc::new(Mutex::new(None)),
+                engines: Arc::new(Mutex::new(HashMap::new())),
             });
             Ok(())
         })
@@ -190,6 +295,8 @@ pub fn run() {
             save_streams,
             get_engine_running,
             submit_remote_input,
+            start_stream,
+            stop_stream,
             start_outputs,
             stop_outputs,
         ])

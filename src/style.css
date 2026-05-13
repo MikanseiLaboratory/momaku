@@ -287,7 +287,7 @@ body {
 }
 
 .th-actions {
-  width: 4.5rem;
+  width: 9.5rem;
 }
 
 .data-table td {
@@ -301,12 +301,34 @@ body {
 }
 
 .cell-actions {
-  width: 4.5rem;
+  width: 9.5rem;
+  white-space: normal;
 }
 
 .cell-actions .btn {
+  display: inline-block;
+  margin: 0.15rem 0.2rem 0.15rem 0;
+  vertical-align: middle;
   padding: 0.35rem 0.55rem;
   font-size: 0.75rem;
+}
+
+.cell-check {
+  text-align: center;
+  white-space: nowrap;
+}
+
+.check-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.78rem;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.check-label input {
+  margin: 0;
 }
 
 .field {

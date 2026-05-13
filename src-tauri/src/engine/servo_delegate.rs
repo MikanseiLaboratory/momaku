@@ -1,4 +1,4 @@
-//! Servo の `WebViewDelegate` / `ServoDelegate`（iced_servo 由来を最小化）。
+//! Servoの`WebViewDelegate` / `ServoDelegate`（iced_servo由来を最小化）。
 
 use std::{
     cell::{Cell, RefCell},

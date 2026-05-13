@@ -12,7 +12,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 
 [features]
 default = []
-# NDI Advanced SDK 連動（grafton-ndi の async 完了コールバック等）。KVM API はクレート未実装のため現状は効果限定。
+# NDI Advanced SDK連動（grafton-ndiのasync完了コールバック等）。KVM APIはクレート未実装のため現状は効果限定。
 ndi-kvm = ["grafton-ndi/advanced_sdk"]
 
 [build-dependencies]
@@ -39,6 +39,10 @@ servo = { version = "0.1", default-features = false, features = [
 dpi = "0.1"
 euclid = "0.22"
 url = "2"
+
+# Servo / tauri等がrustlsに`ring`と`aws_lc_rs`を同時に有効化することがあり、
+# 既定プロバイダが曖昧になる。`lib::run` 冒頭で明示的にインストールする。
+rustls = { version = "0.23", default-features = true }
 
 tauri-plugin-updater = "2"
 tauri-plugin-process = "2"

@@ -1,4 +1,4 @@
-//! Tauri コマンド用のリモート入力ペイロード（Servo 非依存）。
+//! Tauriコマンド用のリモート入力ペイロード（Servo非依存）。
 
 use serde::Deserialize;
 

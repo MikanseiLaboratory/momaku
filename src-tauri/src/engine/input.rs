@@ -1,4 +1,4 @@
-//! リモート入力キュー → Servo `WebView::notify_input_event`。
+//! リモート入力キュー → Servo`WebView::notify_input_event`。
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
@@ -12,23 +12,21 @@ use servo::{
 
 use super::remote_input::{RemoteInput, RemoteInputEvent};
 
-/// 共有キュー（エンジン稼働中に Tauri コマンドが push）。
+/// 共有キュー（エンジン稼働中にTauriコマンドがpush）。
 pub type InputQueue = Arc<Mutex<VecDeque<RemoteInput>>>;
 
 pub fn new_input_queue() -> InputQueue {
     Arc::new(Mutex::new(VecDeque::new()))
 }
 
-pub fn drain_and_apply(queue: &InputQueue, views: &[(&WebView, u32, u32)]) {
+/// 単一WebView用。キューは当該ストリーム専用であること（`submit_remote_input`がindexで振り分ける）。
+pub fn drain_and_apply_all(queue: &InputQueue, webview: &WebView, w: u32, h: u32) {
     let mut q = match queue.lock() {
         Ok(g) => g,
         Err(_) => return,
     };
     while let Some(ev) = q.pop_front() {
-        let Some((wv, w, h)) = views.get(ev.stream_index) else {
-            continue;
-        };
-        apply_one(*wv, *w, *h, &ev.event);
+        apply_one(webview, w, h, &ev.event);
     }
 }
 

@@ -1,10 +1,10 @@
-//! Servo のソフトウェア GL コンテキスト初期化スモーク（`Servo` 本体は起動しない）。
+//! ServoのソフトウェアGLコンテキスト初期化スモーク（`Servo`本体は起動しない）。
 //!
 //! ```text
 //! cargo run --example servo_smoke -p momaku
 //! ```
 //!
-//! Windows では **Visual Studio C++ ビルドツール** が必要です。
+//! Windowsでは**Visual Studio C++ ビルドツール**が必要です。
 
 use dpi::PhysicalSize;
 use servo::SoftwareRenderingContext;

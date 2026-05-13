@@ -4605,6 +4605,7 @@ dependencies = [
  "euclid",
  "futures",
  "grafton-ndi",
+ "rustls",
  "serde",
  "serde_json",
  "servo",

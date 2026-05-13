@@ -13,6 +13,9 @@ import {
 export type StreamRow = {
   url: string;
   ndiName: string;
+  ndiGroups: string;
+  ndiClockVideo: boolean;
+  ndiClockAudio: boolean;
   width: number;
   height: number;
   fps: number;
@@ -20,32 +23,104 @@ export type StreamRow = {
 
 type LogEntry = { id: string; text: string };
 
+type EngineRunningState = {
+  running: boolean;
+  streamsRunning: boolean[];
+};
+
+type BusyState =
+  | null
+  | { kind: "save" }
+  | { kind: "start"; index: number }
+  | { kind: "stop"; index: number }
+  | { kind: "startAll" }
+  | { kind: "stopAll" }
+  | { kind: "update" };
+
 function defaultRow(): StreamRow {
   return {
     url: "https://example.com",
     ndiName: "momaku-1",
+    ndiGroups: "",
+    ndiClockVideo: true,
+    ndiClockAudio: true,
     width: 1280,
     height: 720,
     fps: 30,
   };
 }
 
+function normalizeRow(r: Partial<StreamRow> & Pick<StreamRow, "url" | "ndiName" | "width" | "height" | "fps">): StreamRow {
+  const d = defaultRow();
+  return {
+    ...d,
+    ...r,
+    ndiGroups: r.ndiGroups ?? "",
+    ndiClockVideo: r.ndiClockVideo ?? true,
+    ndiClockAudio: r.ndiClockAudio ?? true,
+  };
+}
+
+function toInvokePayload(rows: StreamRow[]) {
+  return rows.map((row) => ({
+    url: row.url,
+    ndiName: row.ndiName,
+    width: row.width,
+    height: row.height,
+    fps: row.fps,
+    ndiGroups: row.ndiGroups.trim() ? row.ndiGroups.trim() : null,
+    ndiClockVideo: row.ndiClockVideo,
+    ndiClockAudio: row.ndiClockAudio,
+  }));
+}
+
 const StreamRowEditor = memo(function StreamRowEditor({
   index,
   row,
+  rowRunning,
+  busy,
   onPatch,
   onRemove,
+  onStart,
+  onStop,
 }: {
   index: number;
   row: StreamRow;
+  rowRunning: boolean;
+  busy: BusyState;
   onPatch: (i: number, patch: Partial<StreamRow>) => void;
   onRemove: (i: number) => void;
+  onStart: (i: number) => void;
+  onStop: (i: number) => void;
 }) {
+  const rowBusy =
+    busy?.kind === "start" && busy.index === index
+      ? "start"
+      : busy?.kind === "stop" && busy.index === index
+        ? "stop"
+        : null;
+
   return (
     <tr>
       <td className="cell-actions">
-        <button type="button" className="btn btn-ghost" onClick={() => onRemove(index)}>
+        <button type="button" className="btn btn-ghost" onClick={() => onRemove(index)} disabled={rowRunning}>
           削除
+        </button>
+        <button
+          type="button"
+          className="btn btn-primary"
+          onClick={() => onStart(index)}
+          disabled={rowRunning || busy !== null}
+        >
+          {rowBusy === "start" ? "開始中…" : "開始"}
+        </button>
+        <button
+          type="button"
+          className="btn btn-danger"
+          onClick={() => onStop(index)}
+          disabled={!rowRunning || busy !== null}
+        >
+          {rowBusy === "stop" ? "停止中…" : "停止"}
         </button>
       </td>
       <td>
@@ -56,7 +131,7 @@ const StreamRowEditor = memo(function StreamRowEditor({
           onChange={(e) => onPatch(index, { url: e.target.value })}
           spellCheck={false}
           autoComplete="off"
-          aria-label={`ストリーム ${index + 1} の URL`}
+          aria-label={`ストリーム ${index + 1} のURL`}
         />
       </td>
       <td>
@@ -67,8 +142,41 @@ const StreamRowEditor = memo(function StreamRowEditor({
           onChange={(e) => onPatch(index, { ndiName: e.target.value })}
           spellCheck={false}
           autoComplete="off"
-          aria-label={`ストリーム ${index + 1} の NDI 名`}
+          aria-label={`ストリーム ${index + 1} のNDI名`}
         />
+      </td>
+      <td>
+        <input
+          className="field"
+          type="text"
+          value={row.ndiGroups}
+          onChange={(e) => onPatch(index, { ndiGroups: e.target.value })}
+          spellCheck={false}
+          autoComplete="off"
+          aria-label={`ストリーム ${index + 1} のNDIグループ`}
+        />
+      </td>
+      <td className="cell-check">
+        <label className="check-label">
+          <input
+            type="checkbox"
+            checked={row.ndiClockVideo}
+            onChange={(e) => onPatch(index, { ndiClockVideo: e.target.checked })}
+            aria-label={`ストリーム ${index + 1} の動画クロック`}
+          />
+          <span>動画</span>
+        </label>
+      </td>
+      <td className="cell-check">
+        <label className="check-label">
+          <input
+            type="checkbox"
+            checked={row.ndiClockAudio}
+            onChange={(e) => onPatch(index, { ndiClockAudio: e.target.checked })}
+            aria-label={`ストリーム ${index + 1} の音声クロック`}
+          />
+          <span>音声</span>
+        </label>
       </td>
       <td>
         <input
@@ -98,7 +206,7 @@ const StreamRowEditor = memo(function StreamRowEditor({
           min={1}
           max={120}
           onChange={(e) => onPatch(index, { fps: Number(e.target.value) })}
-          aria-label={`ストリーム ${index + 1} の FPS`}
+          aria-label={`ストリーム ${index + 1} のFPS`}
         />
       </td>
     </tr>
@@ -107,9 +215,12 @@ const StreamRowEditor = memo(function StreamRowEditor({
 
 export function App() {
   const [rows, setRows] = useState<StreamRow[] | null>(null);
-  const [running, setRunning] = useState(false);
+  const [engine, setEngine] = useState<EngineRunningState>({
+    running: false,
+    streamsRunning: [],
+  });
   const [logLines, setLogLines] = useState<LogEntry[]>([]);
-  const [busy, setBusy] = useState<"save" | "start" | "stop" | "update" | null>(null);
+  const [busy, setBusy] = useState<BusyState>(null);
 
   const appendLog = useCallback((line: string) => {
     const id = crypto.randomUUID();
@@ -134,17 +245,24 @@ export function App() {
     setRows((prev) => (prev ? prev.filter((_, i) => i !== index) : prev));
   }, []);
 
+  const applyEnginePayload = useCallback((p: EngineRunningState) => {
+    setEngine({
+      running: p.running,
+      streamsRunning: [...p.streamsRunning],
+    });
+  }, []);
+
   useEffect(() => {
     let cancelled = false;
     void (async () => {
       const [streamsResult, runningResult] = await Promise.allSettled([
         invoke<StreamRow[]>("get_streams"),
-        invoke<boolean>("get_engine_running"),
+        invoke<EngineRunningState>("get_engine_running"),
       ]);
       if (cancelled) return;
 
       if (streamsResult.status === "fulfilled") {
-        const list = streamsResult.value;
+        const list = streamsResult.value.map((r) => normalizeRow(r));
         setRows(list.length ? list : [defaultRow()]);
       } else {
         appendLog(`読込エラー: ${String(streamsResult.reason)}`);
@@ -152,15 +270,15 @@ export function App() {
       }
 
       if (runningResult.status === "fulfilled") {
-        setRunning(runningResult.value);
+        applyEnginePayload(runningResult.value);
       } else {
-        setRunning(false);
+        applyEnginePayload({ running: false, streamsRunning: [] });
       }
     })();
     return () => {
       cancelled = true;
     };
-  }, [appendLog]);
+  }, [appendLog, applyEnginePayload]);
 
   useEffect(() => {
     let active = true;
@@ -171,8 +289,8 @@ export function App() {
         listen<{ message: string }>("engine-log", (ev) => {
           appendLog(ev.payload.message);
         }),
-        listen<{ running: boolean }>("engine-status", (ev) => {
-          setRunning(ev.payload.running);
+        listen<EngineRunningState>("engine-status", (ev) => {
+          applyEnginePayload(ev.payload);
         }),
       ]);
       if (!active) {
@@ -187,59 +305,92 @@ export function App() {
       active = false;
       unlisteners.splice(0).forEach((f) => f());
     };
-  }, [appendLog]);
+  }, [appendLog, applyEnginePayload]);
 
   const handleSave = useCallback(async () => {
     if (!rows) return;
-    setBusy("save");
+    if (engine.running) {
+      appendLog("送出中は保存できません。先にすべて停止してください。");
+      return;
+    }
+    setBusy({ kind: "save" });
     try {
-      await invoke("save_streams", { streams: rows });
+      await invoke("save_streams", { streams: toInvokePayload(rows) });
       appendLog("設定を保存しました");
     } catch (e) {
       appendLog(`保存エラー: ${e}`);
     } finally {
       setBusy(null);
     }
-  }, [rows, appendLog]);
+  }, [rows, engine.running, appendLog]);
 
-  const handleStart = useCallback(async () => {
-    if (!rows) return;
-    setBusy("start");
+  const handleStartRow = useCallback(
+    async (index: number) => {
+      if (!rows) return;
+      setBusy({ kind: "start", index });
+      try {
+        await invoke("save_streams", { streams: toInvokePayload(rows) });
+        await invoke("start_stream", { index });
+        appendLog(`ストリーム ${index + 1} の送出を開始しました`);
+      } catch (e) {
+        appendLog(`開始エラー (行 ${index + 1}): ${e}`);
+      } finally {
+        setBusy(null);
+      }
+    },
+    [rows, appendLog],
+  );
+
+  const handleStopRow = useCallback(async (index: number) => {
+    setBusy({ kind: "stop", index });
     try {
-      await invoke("save_streams", { streams: rows });
-      await invoke("start_outputs");
-      setRunning(true);
-      appendLog("送出を開始しました");
+      await invoke("stop_stream", { index });
+      appendLog(`ストリーム ${index + 1} を停止しました`);
     } catch (e) {
-      appendLog(`開始エラー: ${e}`);
+      appendLog(`停止エラー (行 ${index + 1}): ${e}`);
+    } finally {
+      setBusy(null);
+    }
+  }, [appendLog]);
+
+  const handleStartAll = useCallback(async () => {
+    if (!rows) return;
+    setBusy({ kind: "startAll" });
+    try {
+      await invoke("save_streams", { streams: toInvokePayload(rows) });
+      await invoke("start_outputs");
+      appendLog("すべてのストリームの送出を開始しました（未送出の行のみ）");
+    } catch (e) {
+      appendLog(`一括開始エラー: ${e}`);
     } finally {
       setBusy(null);
     }
   }, [rows, appendLog]);
 
-  const handleStop = useCallback(async () => {
-    setBusy("stop");
+  const handleStopAll = useCallback(async () => {
+    setBusy({ kind: "stopAll" });
     try {
       await invoke("stop_outputs");
-      setRunning(false);
-      appendLog("送出を停止しました");
+      appendLog("すべてのストリームを停止しました");
     } catch (e) {
-      appendLog(`停止エラー: ${e}`);
+      appendLog(`一括停止エラー: ${e}`);
     } finally {
       setBusy(null);
     }
   }, [appendLog]);
 
   useEffect(() => {
-    if (!running) return;
+    if (!engine.running) return;
     const sendKey = (kind: "keyDown" | "keyUp", ev: KeyboardEvent) => {
       const t = ev.target as HTMLElement | null;
       if (t?.closest?.("input, textarea, select, button")) return;
       if (ev.repeat) return;
       ev.preventDefault();
+      const idx = engine.streamsRunning.findIndex(Boolean);
+      if (idx < 0) return;
       void invoke("submit_remote_input", {
         input: {
-          streamIndex: 0,
+          streamIndex: idx,
           event: { kind, key: ev.key, keysym: null as number | null },
         },
       }).catch(() => {});
@@ -252,11 +403,11 @@ export function App() {
       window.removeEventListener("keydown", down);
       window.removeEventListener("keyup", up);
     };
-  }, [running]);
+  }, [engine.running, engine.streamsRunning]);
 
   const handleCheckUpdate = useCallback(async () => {
     appendLog("アップデートを確認しています…");
-    setBusy("update");
+    setBusy({ kind: "update" });
     try {
       const update = await check({ timeout: 60_000 });
       if (!update) {
@@ -275,7 +426,10 @@ export function App() {
   }, [appendLog]);
 
   const ready = rows !== null;
-  const colCount = 6;
+  const anyRunning = engine.running;
+  const colCount = 9;
+
+  const rowRunningAt = (i: number) => Boolean(engine.streamsRunning[i]);
 
   return (
     <div className="app-shell">
@@ -284,46 +438,46 @@ export function App() {
           <div className="hero-badge">NDI</div>
           <div className="hero-text">
             <h1 className="title">momaku</h1>
-            <p className="subtitle">Web をキャプチャして NDI で配信（ビデオのみ）</p>
+            <p className="subtitle">WebをキャプチャしてNDIで配信（ビデオのみ）</p>
           </div>
           <div
-            className={`status-pill ${running ? "status-pill--live" : "status-pill--idle"}`}
+            className={`status-pill ${anyRunning ? "status-pill--live" : "status-pill--idle"}`}
             role="status"
             aria-live="polite"
           >
             <span className="status-dot" aria-hidden />
-            {running ? "送出中" : "停止中"}
+            {anyRunning ? "一部またはすべて送出中" : "すべて停止中"}
           </div>
         </header>
 
         <section className="panel toolbar" aria-label="操作">
           <div className="toolbar-cluster">
-            <button type="button" className="btn" onClick={addRow} disabled={!ready}>
+            <button type="button" className="btn" onClick={addRow} disabled={!ready || anyRunning}>
               行を追加
             </button>
             <button
               type="button"
               className="btn"
               onClick={() => void handleSave()}
-              disabled={!ready || busy !== null}
+              disabled={!ready || busy !== null || anyRunning}
             >
-              {busy === "save" ? "保存中…" : "設定を保存"}
+              {busy?.kind === "save" ? "保存中…" : "設定を保存"}
             </button>
             <button
               type="button"
-              className="btn btn-primary"
-              onClick={() => void handleStart()}
-              disabled={!ready || running || busy !== null}
+              className="btn"
+              onClick={() => void handleStartAll()}
+              disabled={!ready || busy !== null}
             >
-              {busy === "start" ? "開始中…" : "開始"}
+              {busy?.kind === "startAll" ? "一括開始中…" : "すべて開始"}
             </button>
             <button
               type="button"
               className="btn btn-danger"
-              onClick={() => void handleStop()}
-              disabled={!running || busy !== null}
+              onClick={() => void handleStopAll()}
+              disabled={!anyRunning || busy !== null}
             >
-              {busy === "stop" ? "停止中…" : "停止"}
+              {busy?.kind === "stopAll" ? "一括停止中…" : "すべて停止"}
             </button>
             <button
               type="button"
@@ -331,7 +485,7 @@ export function App() {
               onClick={() => void handleCheckUpdate()}
               disabled={busy !== null}
             >
-              {busy === "update" ? "更新確認中…" : "更新を確認"}
+              {busy?.kind === "update" ? "更新確認中…" : "更新を確認"}
             </button>
           </div>
         </section>
@@ -341,9 +495,14 @@ export function App() {
             <table className="data-table">
               <thead>
                 <tr>
-                  <th className="th-actions" scope="col" />
+                  <th className="th-actions" scope="col">
+                    操作
+                  </th>
                   <th scope="col">URL</th>
-                  <th scope="col">NDI 名</th>
+                  <th scope="col">NDI名</th>
+                  <th scope="col">NDIグループ</th>
+                  <th scope="col">CLK動画</th>
+                  <th scope="col">CLK音声</th>
                   <th scope="col">幅</th>
                   <th scope="col">高さ</th>
                   <th scope="col">FPS</th>
@@ -362,8 +521,12 @@ export function App() {
                       key={index}
                       index={index}
                       row={row}
+                      rowRunning={rowRunningAt(index)}
+                      busy={busy}
                       onPatch={patchRow}
                       onRemove={removeRow}
+                      onStart={handleStartRow}
+                      onStop={handleStopRow}
                     />
                   ))
                 )}
