@@ -30,15 +30,11 @@ use servo::{
 };
 use tauri::AppHandle;
 use tokio::sync::mpsc::error::TryRecvError;
-use tokio::sync::mpsc::{
-    self, UnboundedReceiver, UnboundedSender,
-};
+use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use tokio::sync::oneshot;
 use url::Url;
 
-use super::config::{
-    emit_log_from_worker, StreamConfig, VideoSendMode, STREAM_FRAME_BUFFER_CAP,
-};
+use super::config::{emit_log_from_worker, StreamConfig, VideoSendMode, STREAM_FRAME_BUFFER_CAP};
 use super::input::{self, InputQueue};
 use super::servo_delegate::{DelegateState, ServoBridge, WebViewBridge};
 
@@ -747,7 +743,7 @@ fn remove_finished_streams(
 
         drop(ndi_frame_tx);
         if let Some(j) = ndi_send_join {
-            let _ = runtime.block_on(async move { j.await });
+            let _ = runtime.block_on(j);
         }
         let sender = Arc::try_unwrap(sender).unwrap_or_else(|_| {
             panic!("NDI Sender Arc がワーカー終了後も残存（参照漏れ）");
@@ -899,13 +895,10 @@ fn try_add_stream(
 
     let fixed_fps_min_dt = Duration::from_secs_f64(1.0 / cfg.fps.max(1) as f64);
 
-    let rgba_frame_bytes = (w0 as usize)
-        .saturating_mul(h0 as usize)
-        .saturating_mul(4);
+    let rgba_frame_bytes = (w0 as usize).saturating_mul(h0 as usize).saturating_mul(4);
     let pool_n = (cfg.frame_buffer.min(STREAM_FRAME_BUFFER_CAP)) as usize;
-    let frame_buffer_pool: Vec<Vec<u8>> = (0..pool_n)
-        .map(|_| vec![0u8; rgba_frame_bytes])
-        .collect();
+    let frame_buffer_pool: Vec<Vec<u8>> =
+        (0..pool_n).map(|_| vec![0u8; rgba_frame_bytes]).collect();
 
     let mut sender_builder = SenderOptions::builder(&cfg.ndi_name)
         .clock_video(true)
@@ -926,7 +919,7 @@ fn try_add_stream(
     };
     let sender = Arc::new(sender);
 
-    let queue_cap = (2usize.saturating_add(pool_n)).min(32).max(2);
+    let queue_cap = (2usize.saturating_add(pool_n)).clamp(2, 32);
     let (ndi_frame_tx, mut frame_rx) = mpsc::channel::<VideoFrame>(queue_cap);
     let (ndi_return_tx, ndi_return_rx) = mpsc::unbounded_channel::<Vec<u8>>();
     let sender_for_ndi = Arc::clone(&sender);
@@ -1004,7 +997,7 @@ fn paint_capture_send_ndi(
     ndi_frame_tx: &mpsc::Sender<VideoFrame>,
     ndi_return_rx: &mut UnboundedReceiver<Vec<u8>>,
     cfg: &StreamConfig,
-    frame_buffer_pool: &mut Vec<Vec<u8>>,
+    frame_buffer_pool: &mut [Vec<u8>],
     pool_cursor: &mut usize,
 ) -> anyhow::Result<bool> {
     if let Err(e) = rendering_context.make_current() {

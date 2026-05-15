@@ -11,9 +11,7 @@ mod remote_input;
 mod servo_delegate;
 mod servo_thread;
 
-pub use config::{
-    EngineLogPayload, EngineStatusPayload, StreamConfig, VideoSendMode,
-};
+pub use config::{EngineLogPayload, EngineStatusPayload, StreamConfig, VideoSendMode};
 pub use input::InputQueue;
 pub use remote_input::RemoteInput;
 
