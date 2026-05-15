@@ -37,8 +37,7 @@ fn copy_windows_runtime_dlls_next_to_exe() {
         .nth(3)
         .unwrap_or_else(|| {
             panic!(
-                "momaku Windows build: unexpected OUT_DIR (expected …/<profile>/build/<pkg>/out): {}",
-                out_dir
+                "momaku Windows build: unexpected OUT_DIR (expected …/<profile>/build/<pkg>/out): {out_dir}"
             )
         })
         .to_path_buf();
@@ -46,9 +45,9 @@ fn copy_windows_runtime_dlls_next_to_exe() {
     let build_root = dest_dir.join("build");
     let Some(mozangle_out_dir) = find_mozangle_out_dir(&build_root) else {
         panic!(
-            "momaku Windows build: mozangle `out` with libEGL.dll not found under {}. \
+            "momaku Windows build: mozangle `out` with libEGL.dll not found under {build_root}. \
              Build the `servo` dependency first (Windows + `no-wgl` / mozangle `build_dlls`).",
-            build_root.display()
+            build_root = build_root.display(),
         );
     };
 
@@ -56,19 +55,19 @@ fn copy_windows_runtime_dlls_next_to_exe() {
         let src = mozangle_out_dir.join(name);
         if !src.is_file() {
             panic!(
-                "momaku Windows build: missing mozangle artifact {}",
-                src.display()
+                "momaku Windows build: missing mozangle artifact {src}",
+                src = src.display(),
             );
         }
         let dst = dest_dir.join(name);
         fs::copy(&src, &dst).unwrap_or_else(|e| {
             panic!(
-                "momaku Windows build: failed to copy {} -> {}: {e}",
-                src.display(),
-                dst.display()
+                "momaku Windows build: failed to copy {src} -> {dst}: {e}",
+                src = src.display(),
+                dst = dst.display(),
             )
         });
-        println!("cargo:rerun-if-changed={}", src.display());
+        println!("cargo:rerun-if-changed={src}", src = src.display());
     }
 
     let ndi_src = manifest_dir
@@ -80,12 +79,12 @@ fn copy_windows_runtime_dlls_next_to_exe() {
             let dst = dest_dir.join("Processing.NDI.Lib.x64.dll");
             fs::copy(&src, &dst).unwrap_or_else(|e| {
                 panic!(
-                    "momaku Windows build: failed to copy NDI DLL {} -> {}: {e}",
-                    src.display(),
-                    dst.display()
+                    "momaku Windows build: failed to copy NDI DLL {src} -> {dst}: {e}",
+                    src = src.display(),
+                    dst = dst.display(),
                 )
             });
-            println!("cargo:rerun-if-changed={}", src.display());
+            println!("cargo:rerun-if-changed={src}", src = src.display());
         }
     }
 }
