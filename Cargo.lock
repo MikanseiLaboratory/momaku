@@ -4616,6 +4616,7 @@ dependencies = [
  "euclid",
  "futures",
  "grafton-ndi",
+ "mozangle",
  "opener",
  "rustls",
  "serde",

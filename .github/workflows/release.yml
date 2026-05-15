@@ -18,7 +18,7 @@ jobs:
         include:
           - runner: windows-latest
             ndi: windows
-            tauri_args: "--verbose --config bundle-with-updater.conf.json"
+            tauri_args: "--verbose --config bundle-with-updater.conf.json --config bundle-release-windows.json"
           - runner: macos-15
             ndi: macos
             tauri_args: "--verbose --config bundle-with-updater.conf.json --config bundle-release-macos.json"

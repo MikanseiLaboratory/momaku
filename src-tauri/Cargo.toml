@@ -18,6 +18,13 @@ ndi-kvm = ["grafton-ndi/advanced_sdk"]
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
+# `build.rs` copies mozangle DLLs from `target/.../build/mozangle-*/out`.
+# Normal (library) dependencies are not guaranteed to finish building before this
+# package's build script runs, so `cargo test` on Windows can race and fail CI.
+# A build-dependency forces mozangle's build script (and `libEGL.dll`) to exist first.
+[target.'cfg(windows)'.build-dependencies]
+mozangle = { version = "0.5.5", default-features = false, features = ["build_dlls"] }
+
 [dependencies]
 tauri = { version = "2", features = [] }
 serde = { version = "1", features = ["derive"] }

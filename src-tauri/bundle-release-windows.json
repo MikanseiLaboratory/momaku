@@ -1,0 +1,9 @@
+{
+  "bundle": {
+    "resources": {
+      "../third_party/ndi-sdk-6/lib/x64/Processing.NDI.Lib.x64.dll": "Processing.NDI.Lib.x64.dll",
+      "../target/release/libEGL.dll": "libEGL.dll",
+      "../target/release/libGLESv2.dll": "libGLESv2.dll"
+    }
+  }
+}
