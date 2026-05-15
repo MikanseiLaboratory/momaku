@@ -480,6 +480,20 @@ body {
   max-width: 3.1rem;
 }
 
+.cell-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  min-width: 7rem;
+}
+
+.field-hint {
+  font-size: 0.7rem;
+  line-height: 1.2;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
 select.field {
   cursor: default;
 }

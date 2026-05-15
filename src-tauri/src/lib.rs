@@ -49,6 +49,7 @@ async fn load_streams(path: &PathBuf) -> Result<Vec<StreamConfig>, String> {
             width: 1280,
             height: 720,
             fps: 30,
+            frame_buffer: 0,
             video_send_mode: engine::VideoSendMode::FixedFps,
         }]);
     }

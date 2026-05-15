@@ -21,7 +21,10 @@ import {
 } from "./appSettings";
 import { IconGithub, IconGlobe, IconPlay, IconSpinner, IconStopSquare, IconTrash, IconTwitch } from "./externalIcons";
 
-export type VideoSendMode = "fixedFps" | "onDemand";
+/** `StreamConfig::STREAM_FRAME_BUFFER_CAP` と一致させる */
+const STREAM_FRAME_BUFFER_CAP = 30;
+
+export type VideoSendMode = "fixedFps" | "onDemand" | "hybrid";
 
 export type StreamRow = {
   url: string;
@@ -29,6 +32,7 @@ export type StreamRow = {
   width: number;
   height: number;
   fps: number;
+  frameBuffer: number;
   videoSendMode: VideoSendMode;
 };
 
@@ -54,8 +58,27 @@ function defaultRow(): StreamRow {
     width: 1280,
     height: 720,
     fps: 30,
+    frameBuffer: 0,
     videoSendMode: "fixedFps",
   };
+}
+
+function clampFrameBuffer(n: unknown): number {
+  if (typeof n !== "number" || !Number.isFinite(n)) return 0;
+  return Math.min(STREAM_FRAME_BUFFER_CAP, Math.max(0, Math.floor(n)));
+}
+
+function normalizeVideoSendMode(v: unknown): VideoSendMode {
+  if (v === "onDemand") return "onDemand";
+  if (v === "hybrid" || v === "Hybrid") return "hybrid";
+  return "fixedFps";
+}
+
+function frameBufferReservedMiB(width: number, height: number, frames: number): number {
+  const w = Math.max(1, Math.floor(width));
+  const h = Math.max(1, Math.floor(height));
+  const f = Math.max(0, Math.floor(frames));
+  return (w * h * 4 * f) / (1024 * 1024);
 }
 
 function normalizeRow(r: Partial<StreamRow> & Pick<StreamRow, "url" | "ndiName" | "width" | "height" | "fps">): StreamRow {
@@ -63,7 +86,8 @@ function normalizeRow(r: Partial<StreamRow> & Pick<StreamRow, "url" | "ndiName" 
   return {
     ...d,
     ...r,
-    videoSendMode: r.videoSendMode === "onDemand" ? "onDemand" : "fixedFps",
+    videoSendMode: normalizeVideoSendMode(r.videoSendMode),
+    frameBuffer: clampFrameBuffer(r.frameBuffer),
   };
 }
 
@@ -102,6 +126,7 @@ function toInvokePayload(rows: StreamRow[]) {
     width: row.width,
     height: row.height,
     fps: row.fps,
+    frameBuffer: row.frameBuffer,
     videoSendMode: row.videoSendMode,
   }));
 }
@@ -131,6 +156,8 @@ const StreamRowEditor = memo(function StreamRowEditor({
       : busy?.kind === "stop" && busy.index === index
         ? "stop"
         : null;
+
+  const reservedMiB = frameBufferReservedMiB(row.width, row.height, row.frameBuffer);
 
   return (
     <tr>
@@ -231,8 +258,34 @@ const StreamRowEditor = memo(function StreamRowEditor({
           aria-label={`ストリーム ${index + 1} の映像送出モード`}
         >
           <option value="fixedFps">常にFPSで送出</option>
+          <option value="hybrid">Hybrid（FPS＋更新時即送出）</option>
           <option value="onDemand">更新時のみ送出</option>
         </select>
+      </td>
+      <td>
+        <div className="cell-stack">
+          <input
+            className="field field-num field-num--fps"
+            type="number"
+            value={row.frameBuffer}
+            min={0}
+            max={STREAM_FRAME_BUFFER_CAP}
+            onChange={(e) => {
+              const raw = Number(e.target.value);
+              const frameBuffer = Number.isFinite(raw)
+                ? Math.min(STREAM_FRAME_BUFFER_CAP, Math.max(0, Math.floor(raw)))
+                : 0;
+              onPatch(index, { frameBuffer });
+            }}
+            aria-label={`ストリーム ${index + 1} のフレームバッファ本数`}
+          />
+          <span
+            className="field-hint"
+            title={`RGBA 8bit 想定: 幅×高さ×4×${row.frameBuffer} バイト`}
+          >
+            先確保 約 {reservedMiB.toFixed(2)} MiB
+          </span>
+        </div>
       </td>
     </tr>
   );
@@ -643,7 +696,7 @@ export function App() {
 
   const ready = rows !== null;
   const anyRunning = engine.running;
-  const colCount = 7;
+  const colCount = 8;
 
   const rowRunningAt = (i: number) => Boolean(engine.streamsRunning[i]);
 
@@ -720,6 +773,7 @@ export function App() {
                   <th scope="col">高さ</th>
                   <th scope="col">FPS</th>
                   <th scope="col">送出モード</th>
+                  <th scope="col">フレームバッファ</th>
                 </tr>
               </thead>
               <tbody>

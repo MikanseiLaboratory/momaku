@@ -5,11 +5,12 @@
 //! - `Sender::new` / `drop`（`NDIlib_send_destroy`）は grafton-ndi の前提に合わせ FFI 専用スレッド `ndi_ffi_tx` に直列化する。
 //! - 停止時は `DropWithAck` で `Sender` を FFI 側へ渡し、ack をホストが非ブロッキングで待ってから
 //!   `done_tx` を返す（ソースがネットワークに残るのを防ぎ、ホストの `spin` もブロックしない）。
-//! - `fixedFps` は累積デッドライン（`1/fps`）で位相を保ち、`park_until` で次ティックまで待ってから送出する（`min_dt` はストリーム登録時にキャッシュ）。
+//! - `fixedFps` / `hybrid` は累積デッドライン（`1/fps`）で位相を保ち、`park_until` で次ティックまで待ってから送出する（`min_dt` はストリーム登録時にキャッシュ）。`hybrid` は `needs_paint` 時に待機を挟まず即 1 フレーム追加送出する。
 //! - NDI `Sender` は映像のみ送出のため **常に** `clock_video=true` / `clock_audio=false`（設定・UI なし）。
 //! - 映像は `Sender::send_video`（同期・SDK 内コピー）。標準 SDK では `send_video_async` の完了待ちが毎フレーム NULL フラッシュ相当になり、描画と直列化してフレーム時間が約倍増しやすいため。
 //! - Servo 資源の drop は一括 `Vec::clear` ではなく順に行い `spin` を挟む（相互デッドロック回避）。
 //! - シェル透明はアプリ設定 `ndi_alpha_enabled`（`shell_background_color_rgba`）。
+//! - `frame_buffer` 本ぶんの RGBA バッファをストリーム開始時に先確保し、`paint_capture_send_ndi` でスロットを回して `read_to_image` の `Vec` を再利用する（`0` で無効）。
 //! - 新規 `Sender::new` の前に `flush_deferred_teardown_before_new_streams` で旧送出を片付け、mpsc FIFO で destroy→create の順を保証。
 
 use std::collections::HashMap;
@@ -31,7 +32,9 @@ use servo::{
 use tauri::AppHandle;
 use url::Url;
 
-use super::config::{emit_log_from_worker, StreamConfig, VideoSendMode};
+use super::config::{
+    emit_log_from_worker, StreamConfig, VideoSendMode, STREAM_FRAME_BUFFER_CAP,
+};
 use super::input::{self, InputQueue};
 use super::servo_delegate::{DelegateState, ServoBridge, WebViewBridge};
 
@@ -68,6 +71,10 @@ struct ActiveStream {
     fixed_fps_deadline: Option<Instant>,
     /// `cfg.fps` から算出した `1/fps`（ホットループ内の除算を避ける）。
     fixed_fps_min_dt: Duration,
+    /// [`StreamConfig::frame_buffer`] 本ぶんの RGBA 生バッファ（`paint_capture_send_ndi` でラウンドロビン使用）。
+    frame_buffer_pool: Vec<Vec<u8>>,
+    /// `frame_buffer_pool` の次スロット。
+    frame_buffer_pool_cursor: usize,
 }
 
 enum HostMessage {
@@ -172,7 +179,7 @@ struct PendingNdiTeardown {
 
 const NDI_TEARDOWN_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// メインループのスロットル（`onDemand` のみ。`fixedFps` 時はデッドライン待ちで律速する）。
+/// メインループのスロットル（`onDemand` のみ。`fixedFps` / `hybrid` 時はデッドライン待ちで律速する）。
 const SERVO_HOST_LOOP_SLEEP: Duration = Duration::from_millis(1);
 
 fn want_transparent_ndi_shell(
@@ -581,6 +588,8 @@ fn servo_host_main(cmd_rx: mpsc::Receiver<HostMessage>) {
                         &slot.rendering_context,
                         &slot.sender,
                         &slot.cfg,
+                        &mut slot.frame_buffer_pool,
+                        &mut slot.frame_buffer_pool_cursor,
                     );
                     if let Err(e) = &paint_res {
                         emit_log_from_worker(
@@ -591,6 +600,52 @@ fn servo_host_main(cmd_rx: mpsc::Receiver<HostMessage>) {
                     }
                     advance_fixed_fps_deadline(slot, min_dt, prev_deadline);
                 }
+                VideoSendMode::Hybrid => {
+                    let min_dt = slot.fixed_fps_min_dt;
+                    let prev_deadline = slot.fixed_fps_deadline;
+                    if slot.delegate.needs_paint.replace(false) {
+                        let paint_res = paint_capture_send_ndi(
+                            &slot.runtime,
+                            &slot.app,
+                            &slot.webview,
+                            &slot.rendering_context,
+                            &slot.sender,
+                            &slot.cfg,
+                            &mut slot.frame_buffer_pool,
+                            &mut slot.frame_buffer_pool_cursor,
+                        );
+                        if let Err(e) = &paint_res {
+                            emit_log_from_worker(
+                                &slot.runtime,
+                                slot.app.clone(),
+                                format!("NDI 送出: {e:#}"),
+                            );
+                        }
+                        advance_fixed_fps_deadline(slot, min_dt, prev_deadline);
+                    } else {
+                        if let Some(d) = prev_deadline {
+                            park_until(d);
+                        }
+                        let paint_res = paint_capture_send_ndi(
+                            &slot.runtime,
+                            &slot.app,
+                            &slot.webview,
+                            &slot.rendering_context,
+                            &slot.sender,
+                            &slot.cfg,
+                            &mut slot.frame_buffer_pool,
+                            &mut slot.frame_buffer_pool_cursor,
+                        );
+                        if let Err(e) = &paint_res {
+                            emit_log_from_worker(
+                                &slot.runtime,
+                                slot.app.clone(),
+                                format!("NDI 送出: {e:#}"),
+                            );
+                        }
+                        advance_fixed_fps_deadline(slot, min_dt, prev_deadline);
+                    }
+                }
                 VideoSendMode::OnDemand => {
                     if slot.delegate.needs_paint.replace(false) {
                         match paint_capture_send_ndi(
@@ -600,6 +655,8 @@ fn servo_host_main(cmd_rx: mpsc::Receiver<HostMessage>) {
                             &slot.rendering_context,
                             &slot.sender,
                             &slot.cfg,
+                            &mut slot.frame_buffer_pool,
+                            &mut slot.frame_buffer_pool_cursor,
                         ) {
                             Ok(_) => {}
                             Err(e) => {
@@ -615,9 +672,12 @@ fn servo_host_main(cmd_rx: mpsc::Receiver<HostMessage>) {
             }
         }
 
-        let any_fixed_fps = slots
-            .values()
-            .any(|s| matches!(s.cfg.video_send_mode, VideoSendMode::FixedFps));
+        let any_fixed_fps = slots.values().any(|s| {
+            matches!(
+                s.cfg.video_send_mode,
+                VideoSendMode::FixedFps | VideoSendMode::Hybrid
+            )
+        });
         if !any_fixed_fps {
             std::thread::sleep(SERVO_HOST_LOOP_SLEEP);
         }
@@ -653,6 +713,8 @@ fn remove_finished_streams(
             ndi_alpha_enabled_at_start: _,
             fixed_fps_deadline: _,
             fixed_fps_min_dt: _,
+            frame_buffer_pool: _,
+            frame_buffer_pool_cursor: _,
         } = slot;
 
         let ack_rx = queue_ndi_sender_teardown(sender);
@@ -802,6 +864,14 @@ fn try_add_stream(
 
     let fixed_fps_min_dt = Duration::from_secs_f64(1.0 / cfg.fps.max(1) as f64);
 
+    let rgba_frame_bytes = (w0 as usize)
+        .saturating_mul(h0 as usize)
+        .saturating_mul(4);
+    let pool_n = (cfg.frame_buffer.min(STREAM_FRAME_BUFFER_CAP)) as usize;
+    let frame_buffer_pool: Vec<Vec<u8>> = (0..pool_n)
+        .map(|_| vec![0u8; rgba_frame_bytes])
+        .collect();
+
     let mut sender_builder = SenderOptions::builder(&cfg.ndi_name)
         .clock_video(true)
         .clock_audio(false);
@@ -849,12 +919,17 @@ fn try_add_stream(
             ndi_alpha_enabled_at_start: ndi_alpha_enabled,
             fixed_fps_deadline: None,
             fixed_fps_min_dt,
+            frame_buffer_pool,
+            frame_buffer_pool_cursor: 0,
         },
     );
     apply_servo_shell_clear_transparency(want_transparent_ndi_shell(slots, false));
 }
 
 /// paint 後に NDI へ 1 フレーム送れたら `true`。
+///
+/// `frame_buffer_pool` が空でないときはスロットに `read_to_image` の `Vec` を載せ替え、送出後に `clear` して
+/// 同じ容量のバッファをスロットへ戻し、ヒープの振れを抑える。
 fn paint_capture_send_ndi(
     runtime: &tokio::runtime::Handle,
     app: &AppHandle,
@@ -862,6 +937,8 @@ fn paint_capture_send_ndi(
     rendering_context: &Rc<SoftwareRenderingContext>,
     sender: &NdiSender,
     cfg: &StreamConfig,
+    frame_buffer_pool: &mut Vec<Vec<u8>>,
+    pool_cursor: &mut usize,
 ) -> anyhow::Result<bool> {
     if let Err(e) = rendering_context.make_current() {
         emit_log_from_worker(runtime, app.clone(), format!("make_current: {e:?}"));
@@ -898,7 +975,20 @@ fn paint_capture_send_ndi(
             rendering_context.present();
             return Ok(false);
         }
-        let frame = VideoFrame {
+
+        let (frame_data, pool_slot_used) = if frame_buffer_pool.is_empty() {
+            (rgba_bytes, None)
+        } else {
+            let n = frame_buffer_pool.len();
+            let i = *pool_cursor % n;
+            *pool_cursor = pool_cursor.wrapping_add(1);
+            let evicted = std::mem::replace(&mut frame_buffer_pool[i], rgba_bytes);
+            let data = std::mem::take(&mut frame_buffer_pool[i]);
+            drop(evicted);
+            (data, Some(i))
+        };
+
+        let mut frame = VideoFrame {
             width: w,
             height: h,
             pixel_format: PixelFormat::RGBA,
@@ -907,12 +997,16 @@ fn paint_capture_send_ndi(
             picture_aspect_ratio: w as f32 / h.max(1) as f32,
             scan_type: ScanType::Progressive,
             timecode: 0,
-            data: rgba_bytes,
+            data: frame_data,
             line_stride_or_size: LineStrideOrSize::LineStrideBytes(stride),
             metadata: None,
             timestamp: 0,
         };
         sender.send_video(&frame);
+        if let Some(i) = pool_slot_used {
+            frame.data.clear();
+            frame_buffer_pool[i] = std::mem::take(&mut frame.data);
+        }
         rendering_context.present();
         return Ok(true);
     }
