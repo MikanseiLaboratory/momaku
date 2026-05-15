@@ -8,8 +8,9 @@ Set-Location (Split-Path -Parent $PSScriptRoot)
 $vendored = Join-Path $PWD 'third_party\ndi-sdk-6'
 $hdr = Join-Path $vendored 'include\Processing.NDI.Lib.h'
 $lib = Join-Path $vendored 'lib\x64\Processing.NDI.Lib.x64.lib'
-if (-not (Test-Path $hdr) -or -not (Test-Path $lib)) {
-    throw "Vendored NDI SDK missing under $vendored. Run scripts/vendor-ndi-sdk-from-local.ps1 or clone a revision that includes third_party/ndi-sdk-6."
+$dll = Join-Path $vendored 'lib\x64\Processing.NDI.Lib.x64.dll'
+if (-not (Test-Path $hdr) -or -not (Test-Path $lib) -or -not (Test-Path $dll)) {
+    throw "Vendored NDI SDK missing under $vendored (need .lib and .dll under lib\x64). Run scripts/vendor-ndi-sdk-from-local.ps1 or clone a revision that includes third_party/ndi-sdk-6."
 }
 $env:NDI_SDK_DIR = (Resolve-Path -LiteralPath $vendored).Path
 Write-Host "NDI_SDK_DIR=$env:NDI_SDK_DIR"
@@ -34,7 +35,9 @@ if (-not [string]::IsNullOrWhiteSpace($env:TAURI_SIGNING_PRIVATE_KEY_PATH) -and 
 }
 
 npm ci
-npm run tauri -- build --verbose --config src-tauri/bundle-with-updater.conf.json
+npm run tauri -- build --verbose --config src-tauri/bundle-with-updater.conf.json --config src-tauri/bundle-release-windows.json
 if ($LASTEXITCODE -ne 0) {
     exit $LASTEXITCODE
 }
+
+& "$PSScriptRoot\verify-windows-bundle-dlls.ps1" -RepoRoot $PWD

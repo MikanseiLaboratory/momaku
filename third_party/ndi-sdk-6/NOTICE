@@ -4,6 +4,10 @@ NDI(R) SDK v6 — vendored build layout (Windows, Linux, macOS)
 This directory is the unified NDI_SDK_DIR for grafton-ndi: include/, lib/x64/,
 lib/x86_64-linux-gnu/, lib/macOS/.
 
+Windows ``lib/x64`` must contain both ``Processing.NDI.Lib.x64.lib`` (link) and
+``Processing.NDI.Lib.x64.dll`` (runtime). The vendoring script copies both from the
+official SDK layout.
+
 How to refresh (maintainers)
 ----------------------------
 From a Windows machine with the official v6 installers in one folder (e.g.
@@ -25,3 +29,5 @@ Distribution and compliance
 
 CI does not download the SDK; ``.github/actions/setup-ndi-sdk`` only points
 NDI_SDK_DIR here and, on Linux, recreates ``libndi.so`` symlinks for the linker.
+Windows release bundles require ``Processing.NDI.Lib.x64.dll`` to be committed under
+``lib/x64`` after running the vendor script (same redistribution rules as the ``.so`` on Linux).

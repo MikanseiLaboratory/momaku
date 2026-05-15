@@ -41,6 +41,11 @@ if (-not (Test-Path (Join-Path $stageWin 'Include/Processing.NDI.Lib.h'))) {
 New-Item -ItemType Directory -Force -Path $includeOut | Out-Null
 Copy-Item -Recurse -Force (Join-Path $stageWin 'Include/*') $includeOut
 Copy-Item -Force (Join-Path $stageWin 'Lib/x64/Processing.NDI.Lib.x64.lib') $libWin
+$ndiDll = Join-Path $stageWin 'Lib/x64/Processing.NDI.Lib.x64.dll'
+if (-not (Test-Path -LiteralPath $ndiDll)) {
+    throw "Windows NDI runtime DLL missing under Lib/x64: $ndiDll"
+}
+Copy-Item -Force $ndiDll $libWin
 
 # --- macOS ---
 $stagePkg = Join-Path $env:TEMP 'momaku-ndi-pkg'
