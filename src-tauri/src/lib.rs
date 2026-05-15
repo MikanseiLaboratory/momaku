@@ -49,8 +49,6 @@ async fn load_streams(path: &PathBuf) -> Result<Vec<StreamConfig>, String> {
             width: 1280,
             height: 720,
             fps: 30,
-            ndi_clock_video: false,
-            ndi_clock_audio: false,
             video_send_mode: engine::VideoSendMode::FixedFps,
         }]);
     }

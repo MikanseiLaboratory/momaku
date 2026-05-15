@@ -26,8 +26,6 @@ export type VideoSendMode = "fixedFps" | "onDemand";
 export type StreamRow = {
   url: string;
   ndiName: string;
-  ndiClockVideo: boolean;
-  ndiClockAudio: boolean;
   width: number;
   height: number;
   fps: number;
@@ -53,8 +51,6 @@ function defaultRow(): StreamRow {
   return {
     url: "https://example.com",
     ndiName: "momaku-1",
-    ndiClockVideo: true,
-    ndiClockAudio: true,
     width: 1280,
     height: 720,
     fps: 30,
@@ -67,8 +63,6 @@ function normalizeRow(r: Partial<StreamRow> & Pick<StreamRow, "url" | "ndiName" 
   return {
     ...d,
     ...r,
-    ndiClockVideo: r.ndiClockVideo ?? true,
-    ndiClockAudio: r.ndiClockAudio ?? true,
     videoSendMode: r.videoSendMode === "onDemand" ? "onDemand" : "fixedFps",
   };
 }
@@ -108,8 +102,6 @@ function toInvokePayload(rows: StreamRow[]) {
     width: row.width,
     height: row.height,
     fps: row.fps,
-    ndiClockVideo: row.ndiClockVideo,
-    ndiClockAudio: row.ndiClockAudio,
     videoSendMode: row.videoSendMode,
   }));
 }
@@ -195,28 +187,6 @@ const StreamRowEditor = memo(function StreamRowEditor({
           autoComplete="off"
           aria-label={`ストリーム ${index + 1} のNDI名`}
         />
-      </td>
-      <td className="cell-check">
-        <label className="check-label">
-          <input
-            type="checkbox"
-            checked={row.ndiClockVideo}
-            onChange={(e) => onPatch(index, { ndiClockVideo: e.target.checked })}
-            aria-label={`ストリーム ${index + 1} の動画クロック`}
-          />
-          <span>動画</span>
-        </label>
-      </td>
-      <td className="cell-check">
-        <label className="check-label">
-          <input
-            type="checkbox"
-            checked={row.ndiClockAudio}
-            onChange={(e) => onPatch(index, { ndiClockAudio: e.target.checked })}
-            aria-label={`ストリーム ${index + 1} の音声クロック`}
-          />
-          <span>音声</span>
-        </label>
       </td>
       <td>
         <input
@@ -673,7 +643,7 @@ export function App() {
 
   const ready = rows !== null;
   const anyRunning = engine.running;
-  const colCount = 9;
+  const colCount = 7;
 
   const rowRunningAt = (i: number) => Boolean(engine.streamsRunning[i]);
 
@@ -746,8 +716,6 @@ export function App() {
                     URL
                   </th>
                   <th scope="col">NDI名</th>
-                  <th scope="col">CLK動画</th>
-                  <th scope="col">CLK音声</th>
                   <th scope="col">幅</th>
                   <th scope="col">高さ</th>
                   <th scope="col">FPS</th>

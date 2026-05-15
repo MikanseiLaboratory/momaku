@@ -5,8 +5,9 @@
 //! - `Sender::new` / `drop`（`NDIlib_send_destroy`）は grafton-ndi の前提に合わせ FFI 専用スレッド `ndi_ffi_tx` に直列化する。
 //! - 停止時は `DropWithAck` で `Sender` を FFI 側へ渡し、ack をホストが非ブロッキングで待ってから
 //!   `done_tx` を返す（ソースがネットワークに残るのを防ぎ、ホストの `spin` もブロックしない）。
-//! - `fixedFps` は累積デッドライン（`1/fps`）で位相を保ち、`park_until` で次ティックまで待ってから送出する。
-//! - 映像は `send_video_async` / `AsyncVideoToken` で RGBA ゼロコピー（[grafton-ndi `Sender`](https://docs.rs/grafton-ndi)）。inflight 1 件のため `read_to_image` と `ndi_rgba_buffer` を `mem::swap`。
+//! - `fixedFps` は累積デッドライン（`1/fps`）で位相を保ち、`park_until` で次ティックまで待ってから送出する（`min_dt` はストリーム登録時にキャッシュ）。
+//! - NDI `Sender` は映像のみ送出のため **常に** `clock_video=true` / `clock_audio=false`（設定・UI なし）。
+//! - 映像は `Sender::send_video`（同期・SDK 内コピー）。標準 SDK では `send_video_async` の完了待ちが毎フレーム NULL フラッシュ相当になり、描画と直列化してフレーム時間が約倍増しやすいため。
 //! - Servo 資源の drop は一括 `Vec::clear` ではなく順に行い `spin` を挟む（相互デッドロック回避）。
 //! - シェル透明はアプリ設定 `ndi_alpha_enabled`（`shell_background_color_rgba`）。
 //! - 新規 `Sender::new` の前に `flush_deferred_teardown_before_new_streams` で旧送出を片付け、mpsc FIFO で destroy→create の順を保証。
@@ -18,12 +19,10 @@ use std::sync::mpsc;
 use std::sync::{Arc, LazyLock, Mutex as StdMutex, OnceLock};
 use std::time::{Duration, Instant};
 
-use anyhow::Context;
 use dpi::PhysicalSize;
 use euclid::{Box2D, Point2D, Scale};
 use grafton_ndi::{
-    BorrowedVideoFrame, LineStrideOrSize, PixelFormat, ScanType, Sender as NdiSender,
-    SenderOptions, NDI,
+    LineStrideOrSize, PixelFormat, ScanType, Sender as NdiSender, SenderOptions, VideoFrame, NDI,
 };
 use servo::{
     EventLoopWaker, Preferences, RenderingContext, Servo, ServoBuilder, SoftwareRenderingContext,
@@ -63,12 +62,12 @@ struct ActiveStream {
     delegate: Rc<DelegateState>,
     rendering_context: Rc<SoftwareRenderingContext>,
     sender: NdiSender,
-    /// NDI 用 RGBA バッファ（`send_video_async`）。
-    ndi_rgba_buffer: Vec<u8>,
     /// 開始時の `ndi_alpha_enabled`（ストリーム終了後のシェル pref 用）。
     ndi_alpha_enabled_at_start: bool,
     /// `fixedFps` の次フレーム送出予定時刻（累積位相）。`None` は初回ティック前。
     fixed_fps_deadline: Option<Instant>,
+    /// `cfg.fps` から算出した `1/fps`（ホットループ内の除算を避ける）。
+    fixed_fps_min_dt: Duration,
 }
 
 enum HostMessage {
@@ -193,21 +192,24 @@ fn apply_servo_shell_clear_transparency(want_transparent: bool) {
     servo::prefs::set(p);
 }
 
-/// `deadline` まで待機（粗い `sleep` と短い残りの yield で OS 粒度のズレを抑える）。
+/// `deadline` まで待機。長い残りは `sleep`、直前は `yield` / `spin_loop` で Windows の `sleep` 粒度による
+/// オーバーシュート（ティック後に数 ms 跳ねる現象）を抑える。
 fn park_until(deadline: Instant) {
-    const COARSE: Duration = Duration::from_millis(2);
+    /// この残りより手前まで一括 `sleep` し、以降は忙待ちに切り替える。
+    const SLEEP_UNTIL_LEFT: Duration = Duration::from_micros(900);
+    const MIN_SLEEP_CHUNK: Duration = Duration::from_micros(400);
     loop {
         let now = Instant::now();
         if now >= deadline {
             return;
         }
         let left = deadline.saturating_duration_since(now);
-        if left > COARSE + Duration::from_micros(400) {
-            std::thread::sleep(left.saturating_sub(Duration::from_millis(1)));
-        } else if left > Duration::from_micros(400) {
-            std::thread::sleep(Duration::from_micros(300));
-        } else {
+        if left > SLEEP_UNTIL_LEFT + MIN_SLEEP_CHUNK {
+            std::thread::sleep(left.saturating_sub(SLEEP_UNTIL_LEFT));
+        } else if left > Duration::from_micros(120) {
             std::thread::yield_now();
+        } else {
+            std::hint::spin_loop();
         }
     }
 }
@@ -567,7 +569,7 @@ fn servo_host_main(cmd_rx: mpsc::Receiver<HostMessage>) {
         for slot in slots.values_mut() {
             match slot.cfg.video_send_mode {
                 VideoSendMode::FixedFps => {
-                    let min_dt = Duration::from_secs_f64(1.0 / slot.cfg.fps.max(1) as f64);
+                    let min_dt = slot.fixed_fps_min_dt;
                     let prev_deadline = slot.fixed_fps_deadline;
                     if let Some(d) = prev_deadline {
                         park_until(d);
@@ -577,8 +579,7 @@ fn servo_host_main(cmd_rx: mpsc::Receiver<HostMessage>) {
                         &slot.app,
                         &slot.webview,
                         &slot.rendering_context,
-                        &mut slot.sender,
-                        &mut slot.ndi_rgba_buffer,
+                        &slot.sender,
                         &slot.cfg,
                     );
                     if let Err(e) = &paint_res {
@@ -597,8 +598,7 @@ fn servo_host_main(cmd_rx: mpsc::Receiver<HostMessage>) {
                             &slot.app,
                             &slot.webview,
                             &slot.rendering_context,
-                            &mut slot.sender,
-                            &mut slot.ndi_rgba_buffer,
+                            &slot.sender,
                             &slot.cfg,
                         ) {
                             Ok(_) => {}
@@ -650,9 +650,9 @@ fn remove_finished_streams(
             delegate,
             rendering_context,
             sender,
-            ndi_rgba_buffer: _,
             ndi_alpha_enabled_at_start: _,
             fixed_fps_deadline: _,
+            fixed_fps_min_dt: _,
         } = slot;
 
         let ack_rx = queue_ndi_sender_teardown(sender);
@@ -800,9 +800,11 @@ fn try_add_stream(
 
     *delegate_state.webview.borrow_mut() = Some(webview.clone());
 
+    let fixed_fps_min_dt = Duration::from_secs_f64(1.0 / cfg.fps.max(1) as f64);
+
     let mut sender_builder = SenderOptions::builder(&cfg.ndi_name)
-        .clock_video(cfg.ndi_clock_video)
-        .clock_audio(cfg.ndi_clock_audio);
+        .clock_video(true)
+        .clock_audio(false);
     if let Some(ref g) = ndi_groups {
         let t = g.trim();
         if !t.is_empty() {
@@ -844,49 +846,12 @@ fn try_add_stream(
             delegate: delegate_state,
             rendering_context,
             sender,
-            ndi_rgba_buffer: Vec::new(),
             ndi_alpha_enabled_at_start: ndi_alpha_enabled,
             fixed_fps_deadline: None,
+            fixed_fps_min_dt,
         },
     );
     apply_servo_shell_clear_transparency(want_transparent_ndi_shell(slots, false));
-}
-
-/// RGBA 1 フレーム。`buffer` は解像度に対する最小バイト長以上。
-fn borrowed_rgba_frame<'a>(
-    buffer: &'a [u8],
-    width: i32,
-    height: i32,
-    frame_rate_n: i32,
-    frame_rate_d: i32,
-) -> anyhow::Result<BorrowedVideoFrame<'a>> {
-    let stride = PixelFormat::RGBA.line_stride(width);
-    let need = PixelFormat::RGBA.info().buffer_len(stride, height);
-    if buffer.len() < need {
-        anyhow::bail!(
-            "RGBA buffer too small: got {}, need {} ({}x{})",
-            buffer.len(),
-            need,
-            width,
-            height
-        );
-    }
-    Ok(unsafe {
-        BorrowedVideoFrame::from_parts_unchecked(
-            &buffer[..need],
-            width,
-            height,
-            PixelFormat::RGBA,
-            frame_rate_n,
-            frame_rate_d,
-            width as f32 / height.max(1) as f32,
-            ScanType::Progressive,
-            0,
-            LineStrideOrSize::LineStrideBytes(stride),
-            None,
-            0,
-        )
-    })
 }
 
 /// paint 後に NDI へ 1 フレーム送れたら `true`。
@@ -895,8 +860,7 @@ fn paint_capture_send_ndi(
     app: &AppHandle,
     webview: &WebView,
     rendering_context: &Rc<SoftwareRenderingContext>,
-    sender: &mut NdiSender,
-    ndi_rgba_buffer: &mut Vec<u8>,
+    sender: &NdiSender,
     cfg: &StreamConfig,
 ) -> anyhow::Result<bool> {
     if let Err(e) = rendering_context.make_current() {
@@ -912,7 +876,7 @@ fn paint_capture_send_ndi(
     if let Some(rgba_img) = rendering_context.read_to_image(rect) {
         let out_w = rgba_img.width();
         let out_h = rgba_img.height();
-        let mut rgba_bytes = rgba_img.into_raw();
+        let rgba_bytes = rgba_img.into_raw();
         let fps_n = cfg.fps as i32;
         let fps_d = 1_i32;
         let w = out_w as i32;
@@ -934,13 +898,21 @@ fn paint_capture_send_ndi(
             rendering_context.present();
             return Ok(false);
         }
-        std::mem::swap(ndi_rgba_buffer, &mut rgba_bytes);
-        let borrowed = borrowed_rgba_frame(ndi_rgba_buffer.as_slice(), w, h, fps_n, fps_d)
-            .context("NDI borrowed frame")?;
-        let token = sender.send_video_async(&borrowed);
-        token
-            .wait()
-            .map_err(|e| anyhow::anyhow!("NDI async video wait: {e}"))?;
+        let frame = VideoFrame {
+            width: w,
+            height: h,
+            pixel_format: PixelFormat::RGBA,
+            frame_rate_n: fps_n,
+            frame_rate_d: fps_d,
+            picture_aspect_ratio: w as f32 / h.max(1) as f32,
+            scan_type: ScanType::Progressive,
+            timecode: 0,
+            data: rgba_bytes,
+            line_stride_or_size: LineStrideOrSize::LineStrideBytes(stride),
+            metadata: None,
+            timestamp: 0,
+        };
+        sender.send_video(&frame);
         rendering_context.present();
         return Ok(true);
     }

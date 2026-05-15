@@ -3,10 +3,6 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::fmt;
 use tauri::Emitter;
 
-fn default_true() -> bool {
-    true
-}
-
 fn default_video_send_mode() -> VideoSendMode {
     VideoSendMode::FixedFps
 }
@@ -70,10 +66,6 @@ pub struct StreamConfig {
     pub width: u32,
     pub height: u32,
     pub fps: u32,
-    #[serde(default = "default_true")]
-    pub ndi_clock_video: bool,
-    #[serde(default = "default_true")]
-    pub ndi_clock_audio: bool,
     #[serde(default = "default_video_send_mode")]
     pub video_send_mode: VideoSendMode,
 }
