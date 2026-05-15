@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="ja">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>momaku NDI alpha test</title>
+    <!-- シェル透明クリアは momaku のアプリ設定「NDI アルファ」で有効化。ここはテスト用ページ自身の CSS のみ。 -->
+    <style>
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        /* ページ背後を透明に（Servo の透明シェル背景と組み合わせて NDI アルファを確認） */
+        background: transparent;
+      }
+      body {
+        background-image: linear-gradient(45deg, #333 25%, transparent 25%),
+          linear-gradient(-45deg, #333 25%, transparent 25%),
+          linear-gradient(45deg, transparent 75%, #333 75%),
+          linear-gradient(-45deg, transparent 75%, #333 75%);
+        background-size: 40px 40px;
+        background-position: 0 0, 0 20px, 20px -20px, -20px 0px;
+      }
+      .card {
+        position: absolute;
+        left: 10%;
+        top: 10%;
+        width: 50%;
+        height: 40%;
+        background: rgba(0, 120, 255, 0.45);
+        border-radius: 12px;
+        box-shadow: 0 8px 32px rgba(0, 0, 0, 0.25);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font: 600 24px system-ui, sans-serif;
+        color: #fff;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="card">半透明カード（NDI でアルファ確認）</div>
+  </body>
+</html>

@@ -877,6 +877,19 @@ export function App() {
               />
               起動時に寄付の案内を表示する
             </label>
+            <label className="modal-check modal-stack">
+              <input
+                type="checkbox"
+                checked={settingsDraft.ndiAlphaEnabled}
+                onChange={(e) =>
+                  setSettingsDraft((d) => ({ ...d, ndiAlphaEnabled: e.target.checked }))
+                }
+              />
+              NDI アルファ（Servo シェルを透明クリア）
+            </label>
+            <p className="log-hint modal-field-hint">
+              ページの CSS は変更しません。送出開始時の設定が使われるため、変更後はストリームを停止してから再開してください。
+            </p>
           </div>
           <div className="modal-actions">
             <button type="button" className="btn btn-ghost" onClick={() => setSettingsOpen(false)}>

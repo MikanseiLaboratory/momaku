@@ -18,6 +18,9 @@ pub struct AppSettings {
     pub default_ndi_groups: String,
     #[serde(default)]
     pub hide_donation_prompt: bool,
+    /// NDI 送出用に Servo のシェルクリアを透明にする（`prefs::shell_background_color_rgba`）。ページの CSS は変更しない。
+    #[serde(default)]
+    pub ndi_alpha_enabled: bool,
 }
 
 impl AppSettings {

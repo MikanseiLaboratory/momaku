@@ -177,6 +177,7 @@ async fn start_stream_inner(
     }
 
     let app_settings = settings::load_app_settings(&settings_path).await;
+    let ndi_alpha_enabled = app_settings.ndi_alpha_enabled;
     let mut cfg = cfg.clone();
     cfg.ndi_groups = settings::effective_ndi_groups_for_stream(&cfg.ndi_groups, &app_settings);
 
@@ -187,7 +188,14 @@ async fn start_stream_inner(
     let stop_for_stream = stop.clone();
     let stop_for_cleanup = stop.clone();
     let join = tokio::spawn(async move {
-        let res = engine::run_single_stream(index, cfg, app_task.clone(), stop_for_stream).await;
+        let res = engine::run_single_stream(
+            index,
+            cfg,
+            app_task.clone(),
+            stop_for_stream,
+            ndi_alpha_enabled,
+        )
+        .await;
         if let Err(e) = res {
             let _ = app_task.emit(
                 "engine-log",
