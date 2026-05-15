@@ -1,4 +1,3 @@
-use std::collections::BTreeSet;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -10,8 +9,11 @@ fn main() {
 }
 
 /// surfman loads `libEGL.dll` from the DLL search path (typically the directory of `momaku.exe`).
-/// mozangle builds those into its crate `OUT_DIR`; copy them next to the final `momaku.exe` output
-/// (`target/<profile>/` for native builds, or `target/<triple>/<profile>/` when cross-compiling).
+/// mozangle builds those into its crate `OUT_DIR`; copy them next to the final `momaku.exe` output.
+///
+/// The destination directory is taken from **this package's** `OUT_DIR` (`…/target/…/<profile>/build/<pkg>/out`),
+/// never from scanning other `target` trees — otherwise DLLs can land under the wrong `CARGO_TARGET_DIR`
+/// while the exe is emitted next to the real build root.
 ///
 /// Also copy the vendored NDI runtime DLL next to the exe so `cargo run --release` and unbundled
 /// `momaku.exe` resolve `Processing.NDI.Lib.x64.dll` without relying on the installer alone.
@@ -28,51 +30,27 @@ fn copy_windows_runtime_dlls_next_to_exe() {
     }
 
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
-    let profile = env::var("PROFILE").unwrap_or_else(|_| "debug".into());
-    let host = env::var("HOST").unwrap_or_default();
+    let out_dir = env::var("OUT_DIR").expect("OUT_DIR must be set by Cargo when build.rs runs");
+    // Cargo layout: `$CARGO_TARGET_DIR/[<$triple>/]<profile>/build/<crate>-<hash>/out`
+    let dest_dir = PathBuf::from(&out_dir)
+        .ancestors()
+        .nth(3)
+        .unwrap_or_else(|| {
+            panic!(
+                "momaku Windows build: unexpected OUT_DIR (expected …/<profile>/build/<pkg>/out): {}",
+                out_dir
+            )
+        })
+        .to_path_buf();
 
-    let mut target_roots: BTreeSet<PathBuf> = BTreeSet::new();
-    if let Ok(td) = env::var("CARGO_TARGET_DIR") {
-        target_roots.insert(PathBuf::from(td));
-    }
-    if let Ok(ws) = env::var("CARGO_WORKSPACE_DIR") {
-        target_roots.insert(PathBuf::from(ws).join("target"));
-    }
-    if let Some(parent) = manifest_dir.parent() {
-        target_roots.insert(parent.join("target"));
-    }
-    target_roots.insert(manifest_dir.join("target"));
-
-    let mut moz_out: Option<PathBuf> = None;
-    let mut dest_dir: Option<PathBuf> = None;
-
-    for root in &target_roots {
-        let dest = if host == target {
-            root.join(&profile)
-        } else {
-            root.join(&target).join(&profile)
-        };
-        let build_root = dest.join("build");
-        if let Some(out) = find_mozangle_out_dir(&build_root) {
-            moz_out = Some(out);
-            dest_dir = Some(dest);
-            break;
-        }
-    }
-
-    let Some(mozangle_out_dir) = moz_out else {
-        let listed = target_roots
-            .iter()
-            .map(|p| p.display().to_string())
-            .collect::<Vec<_>>()
-            .join(", ");
+    let build_root = dest_dir.join("build");
+    let Some(mozangle_out_dir) = find_mozangle_out_dir(&build_root) else {
         panic!(
-            "momaku Windows build: mozangle `out` with libEGL.dll not found under any of: [{}]. \
+            "momaku Windows build: mozangle `out` with libEGL.dll not found under {}. \
              Build the `servo` dependency first (Windows + `no-wgl` / mozangle `build_dlls`).",
-            listed
+            build_root.display()
         );
     };
-    let dest_dir = dest_dir.expect("dest_dir set with moz_out");
 
     for name in ["libEGL.dll", "libGLESv2.dll"] {
         let src = mozangle_out_dir.join(name);
