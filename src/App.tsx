@@ -26,7 +26,6 @@ export type VideoSendMode = "fixedFps" | "onDemand";
 export type StreamRow = {
   url: string;
   ndiName: string;
-  ndiGroups: string;
   ndiClockVideo: boolean;
   ndiClockAudio: boolean;
   width: number;
@@ -44,18 +43,16 @@ type EngineRunningState = {
 
 type BusyState =
   | null
-  | { kind: "save" }
   | { kind: "start"; index: number }
   | { kind: "stop"; index: number }
   | { kind: "startAll" }
   | { kind: "stopAll" }
   | { kind: "update" };
 
-function defaultRow(defaultNdiGroups = ""): StreamRow {
+function defaultRow(): StreamRow {
   return {
     url: "https://example.com",
     ndiName: "momaku-1",
-    ndiGroups: defaultNdiGroups,
     ndiClockVideo: true,
     ndiClockAudio: true,
     width: 1280,
@@ -70,7 +67,6 @@ function normalizeRow(r: Partial<StreamRow> & Pick<StreamRow, "url" | "ndiName" 
   return {
     ...d,
     ...r,
-    ndiGroups: r.ndiGroups ?? "",
     ndiClockVideo: r.ndiClockVideo ?? true,
     ndiClockAudio: r.ndiClockAudio ?? true,
     videoSendMode: r.videoSendMode === "onDemand" ? "onDemand" : "fixedFps",
@@ -112,7 +108,6 @@ function toInvokePayload(rows: StreamRow[]) {
     width: row.width,
     height: row.height,
     fps: row.fps,
-    ndiGroups: row.ndiGroups.trim() ? row.ndiGroups.trim() : null,
     ndiClockVideo: row.ndiClockVideo,
     ndiClockAudio: row.ndiClockAudio,
     videoSendMode: row.videoSendMode,
@@ -179,7 +174,7 @@ const StreamRowEditor = memo(function StreamRowEditor({
           {rowBusy === "stop" ? <IconSpinner /> : <IconStopSquare />}
         </button>
       </td>
-      <td>
+      <td className="cell-url">
         <input
           className="field"
           type="text"
@@ -199,17 +194,6 @@ const StreamRowEditor = memo(function StreamRowEditor({
           spellCheck={false}
           autoComplete="off"
           aria-label={`ストリーム ${index + 1} のNDI名`}
-        />
-      </td>
-      <td>
-        <input
-          className="field"
-          type="text"
-          value={row.ndiGroups}
-          onChange={(e) => onPatch(index, { ndiGroups: e.target.value })}
-          spellCheck={false}
-          autoComplete="off"
-          aria-label={`ストリーム ${index + 1} のNDIグループ`}
         />
       </td>
       <td className="cell-check">
@@ -236,7 +220,7 @@ const StreamRowEditor = memo(function StreamRowEditor({
       </td>
       <td>
         <input
-          className="field field-num"
+          className="field field-num field-num--wh"
           type="number"
           value={row.width}
           min={64}
@@ -246,7 +230,7 @@ const StreamRowEditor = memo(function StreamRowEditor({
       </td>
       <td>
         <input
-          className="field field-num"
+          className="field field-num field-num--wh"
           type="number"
           value={row.height}
           min={64}
@@ -256,7 +240,7 @@ const StreamRowEditor = memo(function StreamRowEditor({
       </td>
       <td>
         <input
-          className="field field-num"
+          className="field field-num field-num--fps"
           type="number"
           value={row.fps}
           min={1}
@@ -298,6 +282,12 @@ export function App() {
   const [settingsDraft, setSettingsDraft] = useState<AppSettings>(DEFAULT_APP_SETTINGS);
   const [donationNeverAgain, setDonationNeverAgain] = useState(false);
   const donationRef = useRef<HTMLDialogElement>(null);
+  const lastPersistedStreamsJson = useRef<string | null>(null);
+  const streamsSaveTimerRef = useRef<number | null>(null);
+  const rowsRef = useRef<StreamRow[] | null>(null);
+  const engineRunningRef = useRef(false);
+  rowsRef.current = rows;
+  engineRunningRef.current = engine.running;
 
   const appendLog = useCallback((line: string) => {
     const id = crypto.randomUUID();
@@ -315,9 +305,8 @@ export function App() {
   }, []);
 
   const addRow = useCallback(() => {
-    const g = appSettings?.defaultNdiGroups ?? "";
-    setRows((prev) => (prev ? [...prev, defaultRow(g)] : prev));
-  }, [appSettings?.defaultNdiGroups]);
+    setRows((prev) => (prev ? [...prev, defaultRow()] : prev));
+  }, []);
 
   const removeRow = useCallback((index: number) => {
     setRows((prev) => (prev ? prev.filter((_, i) => i !== index) : prev));
@@ -345,10 +334,14 @@ export function App() {
 
       if (streamRes.status === "fulfilled") {
         const list = streamRes.value.map((r) => normalizeRow(r));
-        setRows(list.length ? list : [defaultRow(st.defaultNdiGroups)]);
+        const nextRows = list.length ? list : [defaultRow()];
+        lastPersistedStreamsJson.current = JSON.stringify(toInvokePayload(nextRows));
+        setRows(nextRows);
       } else {
         appendLog(`読込エラー:${String(streamRes.reason)}`);
-        setRows([defaultRow(st.defaultNdiGroups)]);
+        const nextRows = [defaultRow()];
+        lastPersistedStreamsJson.current = JSON.stringify(toInvokePayload(nextRows));
+        setRows(nextRows);
       }
 
       if (runningResult.status === "fulfilled") {
@@ -389,21 +382,54 @@ export function App() {
     };
   }, [appendLog, applyEnginePayload]);
 
-  const handleSave = useCallback(async () => {
-    if (!rows) return;
-    if (engine.running) {
-      appendLog("送出中は保存できません。先にすべて停止してください。");
-      return;
+  const flushStreamsSave = useCallback(async () => {
+    if (streamsSaveTimerRef.current !== null) {
+      window.clearTimeout(streamsSaveTimerRef.current);
+      streamsSaveTimerRef.current = null;
     }
-    setBusy({ kind: "save" });
+    const r = rowsRef.current;
+    if (r === null || engineRunningRef.current) return;
+    const payload = toInvokePayload(r);
+    const json = JSON.stringify(payload);
+    if (json === lastPersistedStreamsJson.current) return;
     try {
-      await invoke("save_streams", { streams: toInvokePayload(rows) });
-      appendLog("設定を保存しました");
+      await invoke("save_streams", { streams: payload });
+      lastPersistedStreamsJson.current = json;
     } catch (e) {
       appendLog(`保存エラー:${e}`);
-    } finally {
-      setBusy(null);
     }
+  }, [appendLog]);
+
+  useEffect(() => {
+    if (rows === null || engine.running) return;
+    const payload = toInvokePayload(rows);
+    const json = JSON.stringify(payload);
+    if (json === lastPersistedStreamsJson.current) return;
+    if (streamsSaveTimerRef.current !== null) {
+      window.clearTimeout(streamsSaveTimerRef.current);
+    }
+    streamsSaveTimerRef.current = window.setTimeout(() => {
+      streamsSaveTimerRef.current = null;
+      void (async () => {
+        const r = rowsRef.current;
+        if (r === null || engineRunningRef.current) return;
+        const p = toInvokePayload(r);
+        const j = JSON.stringify(p);
+        if (j === lastPersistedStreamsJson.current) return;
+        try {
+          await invoke("save_streams", { streams: p });
+          lastPersistedStreamsJson.current = j;
+        } catch (e) {
+          appendLog(`保存エラー:${e}`);
+        }
+      })();
+    }, 350);
+    return () => {
+      if (streamsSaveTimerRef.current !== null) {
+        window.clearTimeout(streamsSaveTimerRef.current);
+        streamsSaveTimerRef.current = null;
+      }
+    };
   }, [rows, engine.running, appendLog]);
 
   useEffect(() => {
@@ -490,16 +516,16 @@ export function App() {
       if (!rows) return;
       setBusy({ kind: "start", index });
       try {
-        await invoke("save_streams", { streams: toInvokePayload(rows) });
+        await flushStreamsSave();
         await invoke("start_stream", { index });
         appendLog(`ストリーム${index + 1}の送出を開始しました`);
       } catch (e) {
-        appendLog(`開始エラー(行${index + 1}):${e}`);
+        appendLog(`開始エラー(ストリーム${index + 1}):${e}`);
       } finally {
         setBusy(null);
       }
     },
-    [rows, appendLog],
+    [rows, appendLog, flushStreamsSave],
   );
 
   const handleStopRow = useCallback(async (index: number) => {
@@ -508,7 +534,7 @@ export function App() {
       await invoke("stop_stream", { index });
       appendLog(`ストリーム${index + 1}を停止しました`);
     } catch (e) {
-      appendLog(`停止エラー(行${index + 1}):${e}`);
+      appendLog(`停止エラー(ストリーム${index + 1}):${e}`);
     } finally {
       setBusy(null);
     }
@@ -518,15 +544,15 @@ export function App() {
     if (!rows) return;
     setBusy({ kind: "startAll" });
     try {
-      await invoke("save_streams", { streams: toInvokePayload(rows) });
+      await flushStreamsSave();
       await invoke("start_outputs");
-      appendLog("すべてのストリームの送出を開始しました（未送出の行のみ）");
+      appendLog("すべてのストリームの送出を開始しました（未送出のストリームのみ）");
     } catch (e) {
       appendLog(`一括開始エラー:${e}`);
     } finally {
       setBusy(null);
     }
-  }, [rows, appendLog]);
+  }, [rows, appendLog, flushStreamsSave]);
 
   const handleStopAll = useCallback(async () => {
     setBusy({ kind: "stopAll" });
@@ -647,7 +673,7 @@ export function App() {
 
   const ready = rows !== null;
   const anyRunning = engine.running;
-  const colCount = 10;
+  const colCount = 9;
 
   const rowRunningAt = (i: number) => Boolean(engine.streamsRunning[i]);
 
@@ -673,15 +699,7 @@ export function App() {
         <section className="panel toolbar" aria-label="操作">
           <div className="toolbar-cluster">
             <button type="button" className="btn" onClick={addRow} disabled={!ready || anyRunning}>
-              行を追加
-            </button>
-            <button
-              type="button"
-              className="btn"
-              onClick={() => void handleSave()}
-              disabled={!ready || busy !== null || anyRunning}
-            >
-              {busy?.kind === "save" ? "保存中…" : "設定を保存"}
+              ストリームを追加
             </button>
             <button
               type="button"
@@ -724,12 +742,10 @@ export function App() {
                   <th className="th-actions" scope="col">
                     操作
                   </th>
-                  <th scope="col">URL</th>
-                  <th scope="col">NDI名</th>
-                  <th scope="col">
-                    NDIグループ
-                    <span className="th-hint">空欄の行はアプリ設定の既定グループを使用して送出します</span>
+                  <th className="th-url" scope="col">
+                    URL
                   </th>
+                  <th scope="col">NDI名</th>
                   <th scope="col">CLK動画</th>
                   <th scope="col">CLK音声</th>
                   <th scope="col">幅</th>
@@ -833,7 +849,7 @@ export function App() {
           </h2>
           <div className="modal-body">
             <label className="modal-field-label" htmlFor="app-default-ndi">
-              既定のNDI送出グループ
+              NDI送出グループ
             </label>
             <input
               id="app-default-ndi"
@@ -843,11 +859,11 @@ export function App() {
               onChange={(e) => setSettingsDraft((d) => ({ ...d, defaultNdiGroups: e.target.value }))}
               spellCheck={false}
               autoComplete="off"
-              placeholder="例:MyGroup（各行が空のときに使用）"
+              placeholder="例: MyGroup（空欄でグループなし）"
               aria-describedby="app-default-ndi-hint"
             />
             <p id="app-default-ndi-hint" className="log-hint modal-field-hint">
-              各行の「NDIグループ」が空のとき、この値が送出に使われます（最大256文字）。
+              すべてのストリームで共通（最大256文字）。
             </p>
             <label className="modal-field-label modal-stack" htmlFor="app-theme">
               テーマ
@@ -877,6 +893,17 @@ export function App() {
               />
               起動時に寄付の案内を表示する
             </label>
+            <label className="modal-check modal-stack">
+              <input
+                type="checkbox"
+                checked={settingsDraft.ndiAlphaEnabled}
+                onChange={(e) =>
+                  setSettingsDraft((d) => ({ ...d, ndiAlphaEnabled: e.target.checked }))
+                }
+              />
+              NDI アルファ
+            </label>
+            <p className="log-hint modal-field-hint">ストリーム再開後に反映されます。</p>
           </div>
           <div className="modal-actions">
             <button type="button" className="btn btn-ghost" onClick={() => setSettingsOpen(false)}>

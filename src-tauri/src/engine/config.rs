@@ -70,9 +70,6 @@ pub struct StreamConfig {
     pub width: u32,
     pub height: u32,
     pub fps: u32,
-    /// NDIグループ（空・未設定はNone）
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ndi_groups: Option<String>,
     #[serde(default = "default_true")]
     pub ndi_clock_video: bool,
     #[serde(default = "default_true")]
@@ -95,11 +92,6 @@ impl StreamConfig {
         if !(1..=120).contains(&self.fps) {
             return Err("FPSは1〜120の範囲にしてください".into());
         }
-        if let Some(ref g) = self.ndi_groups {
-            if g.len() > 256 {
-                return Err("NDIグループは256文字以内にしてください".into());
-            }
-        }
         Ok(())
     }
 }
@@ -113,7 +105,7 @@ pub struct EngineLogPayload {
 #[serde(rename_all = "camelCase")]
 pub struct EngineStatusPayload {
     pub running: bool,
-    /// `streams.json`の行インデックスと対応（`true`=当該行が送出中）
+    /// `streams.json` のストリームインデックスと対応（`true` = 当該ストリームが送出中）
     pub streams_running: Vec<bool>,
 }
 

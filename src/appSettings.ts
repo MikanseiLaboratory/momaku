@@ -6,12 +6,14 @@ export type AppSettings = {
   themeMode: ThemeMode;
   defaultNdiGroups: string;
   hideDonationPrompt: boolean;
+  ndiAlphaEnabled: boolean;
 };
 
 export const DEFAULT_APP_SETTINGS: AppSettings = {
   themeMode: "system",
   defaultNdiGroups: "",
   hideDonationPrompt: false,
+  ndiAlphaEnabled: false,
 };
 
 export const APP_VERSION = packageJson.version;
