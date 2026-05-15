@@ -124,7 +124,7 @@ pub(crate) fn emit_log(app: &tauri::AppHandle, message: String) -> tauri::Result
     app.emit("engine-log", EngineLogPayload { message })
 }
 
-/// Servo 用 **std::thread** から `emit` するとメインスレッド待ちでデッドロックし得るため、
+/// Servo 用の **Tokio ブロッキングワーカー**から直接 `emit` するとメインスレッド待ちでデッドロックし得るため、
 /// Tokio ランタイム上で非同期に送る（失敗時は `tracing` のみ）。
 pub(crate) fn emit_log_from_worker(
     runtime: &tokio::runtime::Handle,
