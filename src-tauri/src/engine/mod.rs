@@ -24,5 +24,6 @@ pub async fn run_single_stream(
     ndi_alpha_enabled: bool,
     ndi_groups: Option<String>,
 ) -> anyhow::Result<()> {
-    servo_thread::run_single_stream(stream_index, cfg, app, stop, ndi_alpha_enabled, ndi_groups).await
+    servo_thread::run_single_stream(stream_index, cfg, app, stop, ndi_alpha_enabled, ndi_groups)
+        .await
 }

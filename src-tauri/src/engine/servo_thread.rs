@@ -2,42 +2,49 @@
 //!
 //! - `Servo` はプロセス内 1 つ、`grafton_ndi::NDI` も `OnceLock` で 1 つ。ストリームごとに `WebView`、
 //!   `SoftwareRenderingContext`、NDI `Sender` を持つ。
-//! - `Sender::new` / `drop`（`NDIlib_send_destroy`）は grafton-ndi の前提に合わせ FFI 専用スレッド `ndi_ffi_tx` に直列化する。
+//! - `Sender::new` / `drop`（`NDIlib_send_destroy`）は grafton-ndi の前提に合わせ Tokio `spawn_blocking` 上の NDI FFI 専用ループ（`ndi_ffi_tx`）に直列化する。
 //! - 停止時は `DropWithAck` で `Sender` を FFI 側へ渡し、ack をホストが非ブロッキングで待ってから
 //!   `done_tx` を返す（ソースがネットワークに残るのを防ぎ、ホストの `spin` もブロックしない）。
-//! - `fixedFps` は累積デッドライン（`1/fps`）で位相を保ち、`park_until` で次ティックまで待ってから送出する。
-//! - 映像は `send_video_async` / `AsyncVideoToken` で RGBA ゼロコピー（[grafton-ndi `Sender`](https://docs.rs/grafton-ndi)）。inflight 1 件のため `read_to_image` と `ndi_rgba_buffer` を `mem::swap`。
+//! - `fixedFps` / `hybrid` は累積デッドライン（`1/fps`）で位相を保ち、`park_until` で次ティックまで待ってから送出する（`min_dt` はストリーム登録時にキャッシュ）。`hybrid` は `needs_paint` 時に待機を挟まず即 1 フレーム追加送出する。
+//! - NDI `Sender` は映像のみ送出のため **常に** `clock_video=true` / `clock_audio=false`（設定・UI なし）。
+//! - Servo ホスト本体も NDI `send_video` ワーカーも Tokio `spawn_blocking`（同じランタイムのブロッキングプール）で実行し、`paint` / `read_to_image` と CPU を分離する（有界 `mpsc` でバックプレッシャー）。
 //! - Servo 資源の drop は一括 `Vec::clear` ではなく順に行い `spin` を挟む（相互デッドロック回避）。
 //! - シェル透明はアプリ設定 `ndi_alpha_enabled`（`shell_background_color_rgba`）。
-//! - 新規 `Sender::new` の前に `flush_deferred_teardown_before_new_streams` で旧送出を片付け、mpsc FIFO で destroy→create の順を保証。
+//! - `frame_buffer` 本ぶんの RGBA バッファをストリーム開始時に先確保し、`paint_capture_send_ndi` でラウンドロビン使用。NDI ワーカーが送出後に `Vec` を返却し空スロットへ戻す。
+//! - 新規 `Sender::new` の前に `flush_deferred_teardown_before_new_streams` で旧送出を片付け、Tokio 有界 `mpsc` で destroy→create の順を保証。
 
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc;
 use std::sync::{Arc, LazyLock, Mutex as StdMutex, OnceLock};
 use std::time::{Duration, Instant};
 
-use anyhow::Context;
 use dpi::PhysicalSize;
 use euclid::{Box2D, Point2D, Scale};
 use grafton_ndi::{
-    BorrowedVideoFrame, LineStrideOrSize, PixelFormat, ScanType, Sender as NdiSender,
-    SenderOptions, NDI,
+    LineStrideOrSize, PixelFormat, ScanType, Sender as NdiSender, SenderOptions, VideoFrame, NDI,
 };
 use servo::{
     EventLoopWaker, Preferences, RenderingContext, Servo, ServoBuilder, SoftwareRenderingContext,
     WebView, WebViewBuilder,
 };
 use tauri::AppHandle;
+use tokio::sync::mpsc::error::TryRecvError;
+use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
+use tokio::sync::oneshot;
 use url::Url;
 
-use super::config::{emit_log_from_worker, StreamConfig, VideoSendMode};
+use super::config::{emit_log_from_worker, StreamConfig, VideoSendMode, STREAM_FRAME_BUFFER_CAP};
 use super::input::{self, InputQueue};
 use super::servo_delegate::{DelegateState, ServoBridge, WebViewBridge};
 
+/// `spawn_blocking` 上の Servo ホスト等から、Tokio の `time::sleep` を `Handle::block_on` で同期的に待つ。
+fn servo_thread_sleep(d: Duration) {
+    tokio::runtime::Handle::current().block_on(tokio::time::sleep(d));
+}
+
 struct ChannelWaker {
-    tx: mpsc::Sender<()>,
+    tx: UnboundedSender<()>,
 }
 
 impl EventLoopWaker for ChannelWaker {
@@ -62,13 +69,23 @@ struct ActiveStream {
     webview: WebView,
     delegate: Rc<DelegateState>,
     rendering_context: Rc<SoftwareRenderingContext>,
-    sender: NdiSender,
-    /// NDI 用 RGBA バッファ（`send_video_async`）。
-    ndi_rgba_buffer: Vec<u8>,
+    /// NDI 送出（ワーカーと共有。`try_unwrap` で停止時に FFI 破棄へ渡す）。
+    sender: Arc<NdiSender>,
+    /// NDI 送出ワーカーへ `VideoFrame` を渡す（ドロップでワーカーを終了させる）。
+    ndi_frame_tx: Option<mpsc::Sender<VideoFrame>>,
+    /// ワーカーが `send_video` 後に返却した `Vec`（フレームバッファ用プールの空きを埋める）。
+    ndi_return_rx: UnboundedReceiver<Vec<u8>>,
+    ndi_send_join: Option<tokio::task::JoinHandle<()>>,
     /// 開始時の `ndi_alpha_enabled`（ストリーム終了後のシェル pref 用）。
     ndi_alpha_enabled_at_start: bool,
     /// `fixedFps` の次フレーム送出予定時刻（累積位相）。`None` は初回ティック前。
     fixed_fps_deadline: Option<Instant>,
+    /// `cfg.fps` から算出した `1/fps`（ホットループ内の除算を避ける）。
+    fixed_fps_min_dt: Duration,
+    /// [`StreamConfig::frame_buffer`] 本ぶんの RGBA 生バッファ（`paint_capture_send_ndi` でラウンドロビン使用）。
+    frame_buffer_pool: Vec<Vec<u8>>,
+    /// `frame_buffer_pool` の次スロット。
+    frame_buffer_pool_cursor: usize,
 }
 
 enum HostMessage {
@@ -85,20 +102,20 @@ enum HostMessage {
     },
 }
 
-static SERVO_HOST_TX: LazyLock<StdMutex<Option<mpsc::Sender<HostMessage>>>> =
+static SERVO_HOST_TX: LazyLock<StdMutex<Option<UnboundedSender<HostMessage>>>> =
     LazyLock::new(|| StdMutex::new(None));
 
-fn host_command_tx() -> mpsc::Sender<HostMessage> {
+fn host_command_tx() -> UnboundedSender<HostMessage> {
     let mut g = SERVO_HOST_TX.lock().expect("SERVO_HOST_TX mutex poisoned");
     if let Some(tx) = g.as_ref() {
         return tx.clone();
     }
-    let (tx, rx) = mpsc::channel::<HostMessage>();
+    let (tx, rx) = mpsc::unbounded_channel::<HostMessage>();
     let tx_stored = tx.clone();
-    std::thread::Builder::new()
-        .name("momaku-servo-host".into())
-        .spawn(move || servo_host_main(rx))
-        .expect("spawn momaku-servo-host");
+    let handle = tokio::runtime::Handle::current();
+    handle.spawn_blocking(move || {
+        servo_host_main(rx);
+    });
     *g = Some(tx_stored);
     tx
 }
@@ -135,7 +152,7 @@ pub async fn run_single_stream(
     }) {
         crate::unregister_stream_input(stream_index);
         return Err(anyhow::anyhow!(
-            "Servo ホストスレッドへの送信に失敗しました（終了中？）: {e}"
+            "Servo ホスト（Tokio）への送信に失敗しました（終了中？）: {e}"
         ));
     }
 
@@ -143,7 +160,7 @@ pub async fn run_single_stream(
         Ok(r) => r,
         Err(_) => {
             crate::unregister_stream_input(stream_index);
-            return Err(anyhow::anyhow!("Servoスレッドが結果を返さず終了しました"));
+            return Err(anyhow::anyhow!("Servo ホストが結果を返さず終了しました"));
         }
     };
 
@@ -173,7 +190,7 @@ struct PendingNdiTeardown {
 
 const NDI_TEARDOWN_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// メインループのスロットル（`onDemand` のみ。`fixedFps` 時はデッドライン待ちで律速する）。
+/// メインループのスロットル（`onDemand` のみ。`fixedFps` / `hybrid` 時はデッドライン待ちで律速する）。
 const SERVO_HOST_LOOP_SLEEP: Duration = Duration::from_millis(1);
 
 fn want_transparent_ndi_shell(
@@ -193,21 +210,24 @@ fn apply_servo_shell_clear_transparency(want_transparent: bool) {
     servo::prefs::set(p);
 }
 
-/// `deadline` まで待機（粗い `sleep` と短い残りの yield で OS 粒度のズレを抑える）。
+/// `deadline` まで待機。長い残りは `sleep`、直前は `yield` / `spin_loop` で Windows の `sleep` 粒度による
+/// オーバーシュート（ティック後に数 ms 跳ねる現象）を抑える。
 fn park_until(deadline: Instant) {
-    const COARSE: Duration = Duration::from_millis(2);
+    /// この残りより手前まで一括 `sleep` し、以降は忙待ちに切り替える。
+    const SLEEP_UNTIL_LEFT: Duration = Duration::from_micros(900);
+    const MIN_SLEEP_CHUNK: Duration = Duration::from_micros(400);
     loop {
         let now = Instant::now();
         if now >= deadline {
             return;
         }
         let left = deadline.saturating_duration_since(now);
-        if left > COARSE + Duration::from_micros(400) {
-            std::thread::sleep(left.saturating_sub(Duration::from_millis(1)));
-        } else if left > Duration::from_micros(400) {
-            std::thread::sleep(Duration::from_micros(300));
+        if left > SLEEP_UNTIL_LEFT + MIN_SLEEP_CHUNK {
+            servo_thread_sleep(left.saturating_sub(SLEEP_UNTIL_LEFT));
+        } else if left > Duration::from_micros(120) {
+            tokio::runtime::Handle::current().block_on(tokio::task::yield_now());
         } else {
-            std::thread::yield_now();
+            std::hint::spin_loop();
         }
     }
 }
@@ -245,7 +265,7 @@ fn global_ndi() -> Result<&'static NDI, grafton_ndi::Error> {
 enum NdiFfiCmd {
     Create {
         opts: SenderOptions,
-        reply_tx: mpsc::Sender<Result<NdiSender, grafton_ndi::Error>>,
+        reply_tx: oneshot::Sender<Result<NdiSender, grafton_ndi::Error>>,
     },
     /// 停止時: `NDIlib_send_destroy` 完了までホストが待てるようにする。
     DropWithAck {
@@ -254,43 +274,41 @@ enum NdiFfiCmd {
     },
 }
 
-static NDI_FFI_TX: OnceLock<mpsc::Sender<NdiFfiCmd>> = OnceLock::new();
+static NDI_FFI_TX: OnceLock<UnboundedSender<NdiFfiCmd>> = OnceLock::new();
 
-fn ndi_ffi_tx() -> &'static mpsc::Sender<NdiFfiCmd> {
+fn ndi_ffi_tx() -> &'static UnboundedSender<NdiFfiCmd> {
     NDI_FFI_TX.get_or_init(|| {
-        let (tx, rx) = mpsc::channel::<NdiFfiCmd>();
-        std::thread::Builder::new()
-            .name("momaku-ndi-ffi".into())
-            .spawn(move || {
-                while let Ok(cmd) = rx.recv() {
-                    match cmd {
-                        NdiFfiCmd::Create { opts, reply_tx } => {
-                            let res = match global_ndi() {
-                                Ok(ndi_ref) => NdiSender::new(ndi_ref, &opts),
-                                Err(e) => Err(e),
-                            };
-                            let _ = reply_tx.send(res);
-                        }
-                        NdiFfiCmd::DropWithAck { sender, ack } => {
-                            drop(sender);
-                            let _ = ack.send(());
-                        }
+        let (tx, mut rx) = mpsc::unbounded_channel::<NdiFfiCmd>();
+        let handle = tokio::runtime::Handle::current();
+        handle.spawn_blocking(move || {
+            while let Some(cmd) = rx.blocking_recv() {
+                match cmd {
+                    NdiFfiCmd::Create { opts, reply_tx } => {
+                        let res = match global_ndi() {
+                            Ok(ndi_ref) => NdiSender::new(ndi_ref, &opts),
+                            Err(e) => Err(e),
+                        };
+                        let _ = reply_tx.send(res);
+                    }
+                    NdiFfiCmd::DropWithAck { sender, ack } => {
+                        drop(sender);
+                        let _ = ack.blocking_send(());
                     }
                 }
-            })
-            .expect("spawn momaku-ndi-ffi");
+            }
+        });
         tx
     })
 }
 
 fn ndi_ffi_create(opts: SenderOptions) -> Result<NdiSender, grafton_ndi::Error> {
-    let (reply_tx, reply_rx) = mpsc::channel();
+    let (reply_tx, reply_rx) = oneshot::channel();
     ndi_ffi_tx()
         .send(NdiFfiCmd::Create { opts, reply_tx })
         .map_err(|_| {
-            grafton_ndi::Error::InitializationFailed("NDI FFI thread disconnected".into())
+            grafton_ndi::Error::InitializationFailed("NDI FFI task disconnected".into())
         })?;
-    match reply_rx.recv() {
+    match reply_rx.blocking_recv() {
         Ok(r) => r,
         Err(_) => Err(grafton_ndi::Error::InitializationFailed(
             "NDI FFI create reply channel closed".into(),
@@ -298,18 +316,22 @@ fn ndi_ffi_create(opts: SenderOptions) -> Result<NdiSender, grafton_ndi::Error> 
     }
 }
 
-/// `Sender` を FFI スレッドへ送って destroy。スレッド終了時はこのスレッドで drop し ack を即送る。
+/// `Sender` を FFI ループへ送って destroy。ループ終了時はこのコンテキストで drop し ack を即送る。
 fn queue_ndi_sender_teardown(sender: NdiSender) -> mpsc::Receiver<()> {
-    let (ack_tx, ack_rx) = mpsc::channel();
-    if let Err(mpsc::SendError(cmd)) = ndi_ffi_tx().send(NdiFfiCmd::DropWithAck {
+    let (ack_tx, ack_rx) = mpsc::channel(1);
+    if let Err(e) = ndi_ffi_tx().send(NdiFfiCmd::DropWithAck {
         sender,
         ack: ack_tx,
     }) {
-        let NdiFfiCmd::DropWithAck { sender, ack } = cmd else {
-            unreachable!("queue_ndi_sender_teardown only enqueues DropWithAck");
-        };
-        drop(sender);
-        let _ = ack.send(());
+        match e.0 {
+            NdiFfiCmd::DropWithAck { sender, ack } => {
+                drop(sender);
+                let _ = ack.blocking_send(());
+            }
+            NdiFfiCmd::Create { .. } => {
+                unreachable!("queue_ndi_sender_teardown only enqueues DropWithAck");
+            }
+        }
     }
     ack_rx
 }
@@ -329,7 +351,7 @@ fn drop_deferred_stack_plain(deferred_teardown: &mut Vec<DeferredTeardown>) {
 }
 
 /// `Vec::clear` 一括 drop は `WebView` と NDI `Sender` が相互にブロックし得るため、分解して `spin` を挟む。
-fn teardown_one_stream(servo_ref: &Servo, wrx: &mpsc::Receiver<()>, t: DeferredTeardown) {
+fn teardown_one_stream(servo_ref: &Servo, wrx: &mut UnboundedReceiver<()>, t: DeferredTeardown) {
     let DeferredTeardown {
         rendering_context,
         delegate,
@@ -344,7 +366,7 @@ fn teardown_one_stream(servo_ref: &Servo, wrx: &mpsc::Receiver<()>, t: DeferredT
 }
 
 /// Servo のイベントキューを処理する。ウェイクが途切れたら早期終了し、最大回数で打ち切る。
-fn servo_pump_events(servo_ref: &Servo, wrx: &mpsc::Receiver<()>) {
+fn servo_pump_events(servo_ref: &Servo, wrx: &mut UnboundedReceiver<()>) {
     const MAX_IDLE_PASSES: usize = 48;
     const MAX_TOTAL_SPINS: usize = 20_000;
     let mut total = 0usize;
@@ -372,13 +394,13 @@ fn servo_pump_events(servo_ref: &Servo, wrx: &mpsc::Receiver<()>) {
 /// `try_recv(AddStream)` より前に実行し、旧 NDI 送出手を破棄してから次の `Sender::new` に進む。
 fn flush_deferred_teardown_before_new_streams(
     servo: &Option<Servo>,
-    wake_rx: &Option<mpsc::Receiver<()>>,
+    wake_rx: &mut Option<UnboundedReceiver<()>>,
     deferred_teardown: &mut Vec<DeferredTeardown>,
 ) {
     if deferred_teardown.is_empty() {
         return;
     }
-    let (Some(servo_ref), Some(wrx)) = (servo.as_ref(), wake_rx.as_ref()) else {
+    let (Some(servo_ref), Some(wrx)) = (servo.as_ref(), wake_rx.as_mut()) else {
         drop_deferred_stack_plain(deferred_teardown);
         return;
     };
@@ -398,8 +420,8 @@ fn drain_completed_ndi_teardowns(pending: &mut Vec<PendingNdiTeardown>) {
     pending.retain_mut(|t| {
         let completed = match t.ack_rx.try_recv() {
             Ok(()) => true,
-            Err(mpsc::TryRecvError::Disconnected) => true,
-            Err(mpsc::TryRecvError::Empty) => t.started_at.elapsed() > NDI_TEARDOWN_TIMEOUT,
+            Err(TryRecvError::Disconnected) => true,
+            Err(TryRecvError::Empty) => t.started_at.elapsed() > NDI_TEARDOWN_TIMEOUT,
         };
         if completed {
             if let Some(done_tx) = t.done_tx.take() {
@@ -420,9 +442,9 @@ fn drain_completed_ndi_teardowns(pending: &mut Vec<PendingNdiTeardown>) {
     });
 }
 
-fn servo_host_main(cmd_rx: mpsc::Receiver<HostMessage>) {
+fn servo_host_main(mut cmd_rx: UnboundedReceiver<HostMessage>) {
     let mut servo: Option<Servo> = None;
-    let mut wake_rx: Option<mpsc::Receiver<()>> = None;
+    let mut wake_rx: Option<UnboundedReceiver<()>> = None;
     let mut slots: HashMap<usize, ActiveStream> = HashMap::new();
     // ティアダウンは `spin` 後に `pop` して順次分解 drop（`Vec::clear` の一括 drop は使わない）。
     let mut deferred_teardown: Vec<DeferredTeardown> = Vec::new();
@@ -433,8 +455,8 @@ fn servo_host_main(cmd_rx: mpsc::Receiver<HostMessage>) {
 
         // slots・deferred_teardown・pending_ndi_teardowns がすべて空のときだけブロッキング recv
         if slots.is_empty() && deferred_teardown.is_empty() && pending_ndi_teardowns.is_empty() {
-            match cmd_rx.recv() {
-                Ok(HostMessage::AddStream {
+            match cmd_rx.blocking_recv() {
+                Some(HostMessage::AddStream {
                     stream_index,
                     cfg,
                     ndi_alpha_enabled,
@@ -460,7 +482,7 @@ fn servo_host_main(cmd_rx: mpsc::Receiver<HostMessage>) {
                         &mut slots,
                     );
                 }
-                Err(_) => break,
+                None => break,
             }
             continue;
         }
@@ -474,7 +496,7 @@ fn servo_host_main(cmd_rx: mpsc::Receiver<HostMessage>) {
             apply_servo_shell_clear_transparency(want_transparent_ndi_shell(&slots, false));
         }
 
-        flush_deferred_teardown_before_new_streams(&servo, &wake_rx, &mut deferred_teardown);
+        flush_deferred_teardown_before_new_streams(&servo, &mut wake_rx, &mut deferred_teardown);
 
         while let Ok(HostMessage::AddStream {
             stream_index,
@@ -530,15 +552,15 @@ fn servo_host_main(cmd_rx: mpsc::Receiver<HostMessage>) {
                     &mut slots,
                 );
             }
-            Err(mpsc::TryRecvError::Empty) => {}
-            Err(mpsc::TryRecvError::Disconnected) => break,
+            Err(TryRecvError::Empty) => {}
+            Err(TryRecvError::Disconnected) => break,
         }
 
         let Some(servo_ref) = servo.as_ref() else {
             drop_deferred_stack_plain(&mut deferred_teardown);
             continue;
         };
-        let Some(wrx) = wake_rx.as_ref() else {
+        let Some(wrx) = wake_rx.as_mut() else {
             drop_deferred_stack_plain(&mut deferred_teardown);
             continue;
         };
@@ -567,19 +589,22 @@ fn servo_host_main(cmd_rx: mpsc::Receiver<HostMessage>) {
         for slot in slots.values_mut() {
             match slot.cfg.video_send_mode {
                 VideoSendMode::FixedFps => {
-                    let min_dt = Duration::from_secs_f64(1.0 / slot.cfg.fps.max(1) as f64);
+                    let min_dt = slot.fixed_fps_min_dt;
                     let prev_deadline = slot.fixed_fps_deadline;
                     if let Some(d) = prev_deadline {
                         park_until(d);
                     }
+                    let ndi_tx = slot.ndi_frame_tx.as_ref().expect("NDI frame queue");
                     let paint_res = paint_capture_send_ndi(
                         &slot.runtime,
                         &slot.app,
                         &slot.webview,
                         &slot.rendering_context,
-                        &mut slot.sender,
-                        &mut slot.ndi_rgba_buffer,
+                        ndi_tx,
+                        &mut slot.ndi_return_rx,
                         &slot.cfg,
+                        &mut slot.frame_buffer_pool,
+                        &mut slot.frame_buffer_pool_cursor,
                     );
                     if let Err(e) = &paint_res {
                         emit_log_from_worker(
@@ -590,16 +615,69 @@ fn servo_host_main(cmd_rx: mpsc::Receiver<HostMessage>) {
                     }
                     advance_fixed_fps_deadline(slot, min_dt, prev_deadline);
                 }
+                VideoSendMode::Hybrid => {
+                    let min_dt = slot.fixed_fps_min_dt;
+                    let prev_deadline = slot.fixed_fps_deadline;
+                    if slot.delegate.needs_paint.replace(false) {
+                        let ndi_tx = slot.ndi_frame_tx.as_ref().expect("NDI frame queue");
+                        let paint_res = paint_capture_send_ndi(
+                            &slot.runtime,
+                            &slot.app,
+                            &slot.webview,
+                            &slot.rendering_context,
+                            ndi_tx,
+                            &mut slot.ndi_return_rx,
+                            &slot.cfg,
+                            &mut slot.frame_buffer_pool,
+                            &mut slot.frame_buffer_pool_cursor,
+                        );
+                        if let Err(e) = &paint_res {
+                            emit_log_from_worker(
+                                &slot.runtime,
+                                slot.app.clone(),
+                                format!("NDI 送出: {e:#}"),
+                            );
+                        }
+                        advance_fixed_fps_deadline(slot, min_dt, prev_deadline);
+                    } else {
+                        if let Some(d) = prev_deadline {
+                            park_until(d);
+                        }
+                        let ndi_tx = slot.ndi_frame_tx.as_ref().expect("NDI frame queue");
+                        let paint_res = paint_capture_send_ndi(
+                            &slot.runtime,
+                            &slot.app,
+                            &slot.webview,
+                            &slot.rendering_context,
+                            ndi_tx,
+                            &mut slot.ndi_return_rx,
+                            &slot.cfg,
+                            &mut slot.frame_buffer_pool,
+                            &mut slot.frame_buffer_pool_cursor,
+                        );
+                        if let Err(e) = &paint_res {
+                            emit_log_from_worker(
+                                &slot.runtime,
+                                slot.app.clone(),
+                                format!("NDI 送出: {e:#}"),
+                            );
+                        }
+                        advance_fixed_fps_deadline(slot, min_dt, prev_deadline);
+                    }
+                }
                 VideoSendMode::OnDemand => {
                     if slot.delegate.needs_paint.replace(false) {
+                        let ndi_tx = slot.ndi_frame_tx.as_ref().expect("NDI frame queue");
                         match paint_capture_send_ndi(
                             &slot.runtime,
                             &slot.app,
                             &slot.webview,
                             &slot.rendering_context,
-                            &mut slot.sender,
-                            &mut slot.ndi_rgba_buffer,
+                            ndi_tx,
+                            &mut slot.ndi_return_rx,
                             &slot.cfg,
+                            &mut slot.frame_buffer_pool,
+                            &mut slot.frame_buffer_pool_cursor,
                         ) {
                             Ok(_) => {}
                             Err(e) => {
@@ -615,11 +693,14 @@ fn servo_host_main(cmd_rx: mpsc::Receiver<HostMessage>) {
             }
         }
 
-        let any_fixed_fps = slots
-            .values()
-            .any(|s| matches!(s.cfg.video_send_mode, VideoSendMode::FixedFps));
+        let any_fixed_fps = slots.values().any(|s| {
+            matches!(
+                s.cfg.video_send_mode,
+                VideoSendMode::FixedFps | VideoSendMode::Hybrid
+            )
+        });
         if !any_fixed_fps {
-            std::thread::sleep(SERVO_HOST_LOOP_SLEEP);
+            servo_thread_sleep(SERVO_HOST_LOOP_SLEEP);
         }
     }
 }
@@ -650,11 +731,23 @@ fn remove_finished_streams(
             delegate,
             rendering_context,
             sender,
-            ndi_rgba_buffer: _,
+            ndi_frame_tx,
+            ndi_return_rx: _,
+            ndi_send_join,
             ndi_alpha_enabled_at_start: _,
             fixed_fps_deadline: _,
+            fixed_fps_min_dt: _,
+            frame_buffer_pool: _,
+            frame_buffer_pool_cursor: _,
         } = slot;
 
+        drop(ndi_frame_tx);
+        if let Some(j) = ndi_send_join {
+            let _ = runtime.block_on(j);
+        }
+        let sender = Arc::try_unwrap(sender).unwrap_or_else(|_| {
+            panic!("NDI Sender Arc がワーカー終了後も残存（参照漏れ）");
+        });
         let ack_rx = queue_ndi_sender_teardown(sender);
 
         pending_ndi_teardowns.push(PendingNdiTeardown {
@@ -689,7 +782,7 @@ fn try_add_stream(
     runtime: tokio::runtime::Handle,
     app: AppHandle,
     servo: &mut Option<Servo>,
-    wake_rx: &mut Option<mpsc::Receiver<()>>,
+    wake_rx: &mut Option<UnboundedReceiver<()>>,
     slots: &mut HashMap<usize, ActiveStream>,
 ) {
     if slots.contains_key(&stream_index) {
@@ -721,7 +814,7 @@ fn try_add_stream(
             format!("Servoを起動しています（ストリーム {stream_index} / NDI ランタイム共有）…"),
         );
         super::kvm_ndi::log_kvm_capability_once();
-        let (w_tx, w_rx) = mpsc::channel::<()>();
+        let (w_tx, w_rx) = mpsc::unbounded_channel::<()>();
         let waker: Box<dyn EventLoopWaker> = Box::new(ChannelWaker { tx: w_tx.clone() });
         let mut prefs = Preferences::default();
         if want_shell {
@@ -800,9 +893,16 @@ fn try_add_stream(
 
     *delegate_state.webview.borrow_mut() = Some(webview.clone());
 
+    let fixed_fps_min_dt = Duration::from_secs_f64(1.0 / cfg.fps.max(1) as f64);
+
+    let rgba_frame_bytes = (w0 as usize).saturating_mul(h0 as usize).saturating_mul(4);
+    let pool_n = (cfg.frame_buffer.min(STREAM_FRAME_BUFFER_CAP)) as usize;
+    let frame_buffer_pool: Vec<Vec<u8>> =
+        (0..pool_n).map(|_| vec![0u8; rgba_frame_bytes]).collect();
+
     let mut sender_builder = SenderOptions::builder(&cfg.ndi_name)
-        .clock_video(cfg.ndi_clock_video)
-        .clock_audio(cfg.ndi_clock_audio);
+        .clock_video(true)
+        .clock_audio(false);
     if let Some(ref g) = ndi_groups {
         let t = g.trim();
         if !t.is_empty() {
@@ -817,6 +917,24 @@ fn try_add_stream(
             return;
         }
     };
+    let sender = Arc::new(sender);
+
+    let queue_cap = (2usize.saturating_add(pool_n)).clamp(2, 32);
+    let (ndi_frame_tx, mut frame_rx) = mpsc::channel::<VideoFrame>(queue_cap);
+    let (ndi_return_tx, ndi_return_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+    let sender_for_ndi = Arc::clone(&sender);
+    let pool_n_u = pool_n;
+    let ndi_send_join = runtime.spawn_blocking(move || {
+        let return_bufs = pool_n_u > 0;
+        while let Some(mut frame) = frame_rx.blocking_recv() {
+            sender_for_ndi.send_video(&frame);
+            if return_bufs {
+                let mut d = std::mem::take(&mut frame.data);
+                d.clear();
+                let _ = ndi_return_tx.send(d);
+            }
+        }
+    });
 
     webview.resize(PhysicalSize::new(w0, h0));
     webview.show();
@@ -844,60 +962,43 @@ fn try_add_stream(
             delegate: delegate_state,
             rendering_context,
             sender,
-            ndi_rgba_buffer: Vec::new(),
+            ndi_frame_tx: Some(ndi_frame_tx),
+            ndi_return_rx,
+            ndi_send_join: Some(ndi_send_join),
             ndi_alpha_enabled_at_start: ndi_alpha_enabled,
             fixed_fps_deadline: None,
+            fixed_fps_min_dt,
+            frame_buffer_pool,
+            frame_buffer_pool_cursor: 0,
         },
     );
     apply_servo_shell_clear_transparency(want_transparent_ndi_shell(slots, false));
 }
 
-/// RGBA 1 フレーム。`buffer` は解像度に対する最小バイト長以上。
-fn borrowed_rgba_frame<'a>(
-    buffer: &'a [u8],
-    width: i32,
-    height: i32,
-    frame_rate_n: i32,
-    frame_rate_d: i32,
-) -> anyhow::Result<BorrowedVideoFrame<'a>> {
-    let stride = PixelFormat::RGBA.line_stride(width);
-    let need = PixelFormat::RGBA.info().buffer_len(stride, height);
-    if buffer.len() < need {
-        anyhow::bail!(
-            "RGBA buffer too small: got {}, need {} ({}x{})",
-            buffer.len(),
-            need,
-            width,
-            height
-        );
+/// paint 後に NDI 送出ワーカーへ 1 フレーム送れたら `true`。
+///
+/// `frame_buffer_pool` が空でないときはスロットに `read_to_image` の `Vec` を載せ替え、ワーカーが `send_video`
+/// 後に `Vec` を返却し、`drain_ndi_return_buffers` で空スロットへ戻してヒープの振れを抑える。
+fn drain_ndi_return_buffers(pool: &mut [Vec<u8>], rx: &mut UnboundedReceiver<Vec<u8>>) {
+    while let Ok(mut v) = rx.try_recv() {
+        v.clear();
+        if let Some(slot) = pool.iter_mut().find(|s| s.is_empty()) {
+            *slot = v;
+        }
     }
-    Ok(unsafe {
-        BorrowedVideoFrame::from_parts_unchecked(
-            &buffer[..need],
-            width,
-            height,
-            PixelFormat::RGBA,
-            frame_rate_n,
-            frame_rate_d,
-            width as f32 / height.max(1) as f32,
-            ScanType::Progressive,
-            0,
-            LineStrideOrSize::LineStrideBytes(stride),
-            None,
-            0,
-        )
-    })
 }
 
-/// paint 後に NDI へ 1 フレーム送れたら `true`。
+#[allow(clippy::too_many_arguments)]
 fn paint_capture_send_ndi(
     runtime: &tokio::runtime::Handle,
     app: &AppHandle,
     webview: &WebView,
     rendering_context: &Rc<SoftwareRenderingContext>,
-    sender: &mut NdiSender,
-    ndi_rgba_buffer: &mut Vec<u8>,
+    ndi_frame_tx: &mpsc::Sender<VideoFrame>,
+    ndi_return_rx: &mut UnboundedReceiver<Vec<u8>>,
     cfg: &StreamConfig,
+    frame_buffer_pool: &mut [Vec<u8>],
+    pool_cursor: &mut usize,
 ) -> anyhow::Result<bool> {
     if let Err(e) = rendering_context.make_current() {
         emit_log_from_worker(runtime, app.clone(), format!("make_current: {e:?}"));
@@ -912,7 +1013,7 @@ fn paint_capture_send_ndi(
     if let Some(rgba_img) = rendering_context.read_to_image(rect) {
         let out_w = rgba_img.width();
         let out_h = rgba_img.height();
-        let mut rgba_bytes = rgba_img.into_raw();
+        let rgba_bytes = rgba_img.into_raw();
         let fps_n = cfg.fps as i32;
         let fps_d = 1_i32;
         let w = out_w as i32;
@@ -934,13 +1035,40 @@ fn paint_capture_send_ndi(
             rendering_context.present();
             return Ok(false);
         }
-        std::mem::swap(ndi_rgba_buffer, &mut rgba_bytes);
-        let borrowed = borrowed_rgba_frame(ndi_rgba_buffer.as_slice(), w, h, fps_n, fps_d)
-            .context("NDI borrowed frame")?;
-        let token = sender.send_video_async(&borrowed);
-        token
-            .wait()
-            .map_err(|e| anyhow::anyhow!("NDI async video wait: {e}"))?;
+
+        if !frame_buffer_pool.is_empty() {
+            drain_ndi_return_buffers(frame_buffer_pool, ndi_return_rx);
+        }
+
+        let frame_data = if frame_buffer_pool.is_empty() {
+            rgba_bytes
+        } else {
+            let n = frame_buffer_pool.len();
+            let i = *pool_cursor % n;
+            *pool_cursor = pool_cursor.wrapping_add(1);
+            let evicted = std::mem::replace(&mut frame_buffer_pool[i], rgba_bytes);
+            let data = std::mem::take(&mut frame_buffer_pool[i]);
+            drop(evicted);
+            data
+        };
+
+        let frame = VideoFrame {
+            width: w,
+            height: h,
+            pixel_format: PixelFormat::RGBA,
+            frame_rate_n: fps_n,
+            frame_rate_d: fps_d,
+            picture_aspect_ratio: w as f32 / h.max(1) as f32,
+            scan_type: ScanType::Progressive,
+            timecode: 0,
+            data: frame_data,
+            line_stride_or_size: LineStrideOrSize::LineStrideBytes(stride),
+            metadata: None,
+            timestamp: 0,
+        };
+        ndi_frame_tx
+            .blocking_send(frame)
+            .map_err(|_| anyhow::anyhow!("NDI 送出ワーカーが終了しました"))?;
         rendering_context.present();
         return Ok(true);
     }

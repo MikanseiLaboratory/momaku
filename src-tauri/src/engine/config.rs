@@ -3,21 +3,26 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::fmt;
 use tauri::Emitter;
 
-fn default_true() -> bool {
-    true
-}
-
 fn default_video_send_mode() -> VideoSendMode {
     VideoSendMode::FixedFps
 }
 
-/// 映像の `paint` と NDI 送出のタイミング（JSON では `"fixedFps"` / `"onDemand"` 文字列）。
+fn default_frame_buffer() -> u32 {
+    0
+}
+
+/// ストリームあたりのフレームバッファ（先確保する RGBA 生バッファ本数）の上限。
+pub const STREAM_FRAME_BUFFER_CAP: u32 = 30;
+
+/// 映像の `paint` と NDI 送出のタイミング（JSON では `"fixedFps"` / `"onDemand"` / `"hybrid"`）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VideoSendMode {
     /// 累積デッドラインで間隔 `1/fps` を維持し、その時刻まで待機してから `paint` + NDI 送出する。
     FixedFps,
     /// Servo が `needs_paint` を立てたときのみ `paint` + 送出する。
     OnDemand,
+    /// `FixedFps` と同様に FPS を維持しつつ、`needs_paint` のときは待たずに即 1 フレーム送出する。
+    Hybrid,
 }
 
 impl Serialize for VideoSendMode {
@@ -28,6 +33,7 @@ impl Serialize for VideoSendMode {
         serializer.serialize_str(match self {
             VideoSendMode::FixedFps => "fixedFps",
             VideoSendMode::OnDemand => "onDemand",
+            VideoSendMode::Hybrid => "hybrid",
         })
     }
 }
@@ -38,7 +44,7 @@ impl Visitor<'_> for VideoSendModeStrVisitor {
     type Value = VideoSendMode;
 
     fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
-        formatter.write_str("\"fixedFps\" or \"onDemand\"")
+        formatter.write_str("\"fixedFps\", \"onDemand\", or \"hybrid\"")
     }
 
     fn visit_str<E>(self, v: &str) -> Result<Self::Value, E>
@@ -48,6 +54,7 @@ impl Visitor<'_> for VideoSendModeStrVisitor {
         match v {
             "fixedFps" | "FixedFps" => Ok(VideoSendMode::FixedFps),
             "onDemand" | "OnDemand" => Ok(VideoSendMode::OnDemand),
+            "hybrid" | "Hybrid" => Ok(VideoSendMode::Hybrid),
             _ => Err(E::custom(format!("未知の videoSendMode: {v}"))),
         }
     }
@@ -70,10 +77,9 @@ pub struct StreamConfig {
     pub width: u32,
     pub height: u32,
     pub fps: u32,
-    #[serde(default = "default_true")]
-    pub ndi_clock_video: bool,
-    #[serde(default = "default_true")]
-    pub ndi_clock_audio: bool,
+    /// NDI 送出用に先確保する RGBA フレーム相当バッファの本数（0 で無効、最大 [`STREAM_FRAME_BUFFER_CAP`]）。
+    #[serde(default = "default_frame_buffer")]
+    pub frame_buffer: u32,
     #[serde(default = "default_video_send_mode")]
     pub video_send_mode: VideoSendMode,
 }
@@ -91,6 +97,11 @@ impl StreamConfig {
         }
         if !(1..=120).contains(&self.fps) {
             return Err("FPSは1〜120の範囲にしてください".into());
+        }
+        if self.frame_buffer > STREAM_FRAME_BUFFER_CAP {
+            return Err(format!(
+                "フレームバッファは0〜{STREAM_FRAME_BUFFER_CAP}の範囲にしてください"
+            ));
         }
         Ok(())
     }
@@ -113,7 +124,7 @@ pub(crate) fn emit_log(app: &tauri::AppHandle, message: String) -> tauri::Result
     app.emit("engine-log", EngineLogPayload { message })
 }
 
-/// Servo 用 **std::thread** から `emit` するとメインスレッド待ちでデッドロックし得るため、
+/// Servo 用の **Tokio ブロッキングワーカー**から直接 `emit` するとメインスレッド待ちでデッドロックし得るため、
 /// Tokio ランタイム上で非同期に送る（失敗時は `tracing` のみ）。
 pub(crate) fn emit_log_from_worker(
     runtime: &tokio::runtime::Handle,
