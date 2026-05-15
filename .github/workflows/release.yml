@@ -14,15 +14,16 @@ jobs:
       fail-fast: false
       # tauri-action merges latest.json: each row downloads existing release asset platforms then appends this OS/arch.
       # Rare race if two jobs upload simultaneously; re-run failed job if a platform entry is missing.
+      # macOS: macos-26 = Apple Silicon (GA), macos-26-intel = x86_64 (replaces retired macos-13 / macos-15-intel path).
       matrix:
         include:
           - runner: windows-latest
             ndi: windows
             tauri_args: "--verbose --config bundle-with-updater.conf.json --config bundle-release-windows.json"
-          - runner: macos-15
+          - runner: macos-26
             ndi: macos
             tauri_args: "--verbose --config bundle-with-updater.conf.json --config bundle-release-macos.json"
-          - runner: macos-13
+          - runner: macos-26-intel
             ndi: macos
             tauri_args: "--verbose --config bundle-with-updater.conf.json --config bundle-release-macos.json"
           - runner: ubuntu-24.04
