@@ -313,6 +313,7 @@ body {
 
 .data-table {
   width: 100%;
+  table-layout: fixed;
   border-collapse: collapse;
   font-size: 0.82rem;
 }
@@ -339,6 +340,26 @@ body {
 .th-actions {
   width: 9rem;
   min-width: 9rem;
+}
+
+.th-url {
+  width: 17rem;
+  min-width: 14rem;
+  max-width: 20rem;
+}
+
+.cell-url {
+  width: 17rem;
+  min-width: 14rem;
+  max-width: 20rem;
+  overflow: hidden;
+}
+
+.cell-url .field {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .data-table td {
@@ -446,7 +467,17 @@ body {
 }
 
 .field-num {
-  max-width: 5.5rem;
+  box-sizing: border-box;
+}
+
+.field-num--wh {
+  width: 4.35rem;
+  max-width: 4.35rem;
+}
+
+.field-num--fps {
+  width: 3.1rem;
+  max-width: 3.1rem;
 }
 
 select.field {

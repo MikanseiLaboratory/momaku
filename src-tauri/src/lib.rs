@@ -49,7 +49,6 @@ async fn load_streams(path: &PathBuf) -> Result<Vec<StreamConfig>, String> {
             width: 1280,
             height: 720,
             fps: 30,
-            ndi_groups: None,
             ndi_clock_video: false,
             ndi_clock_audio: false,
             video_send_mode: engine::VideoSendMode::FixedFps,
@@ -172,14 +171,15 @@ async fn start_stream_inner(
     {
         let map = engines.lock().await;
         if map.contains_key(&index) {
-            return Err("この行は既に送出中です".into());
+            return Err("このストリームは既に送出中です".into());
         }
     }
 
     let app_settings = settings::load_app_settings(&settings_path).await;
+    app_settings.validate().map_err(|e| e.to_string())?;
     let ndi_alpha_enabled = app_settings.ndi_alpha_enabled;
-    let mut cfg = cfg.clone();
-    cfg.ndi_groups = settings::effective_ndi_groups_for_stream(&cfg.ndi_groups, &app_settings);
+    let ndi_groups = settings::ndi_groups_from_app_settings(&app_settings);
+    let cfg = cfg.clone();
 
     let engines_slot = engines.clone();
     let streams_path_bg = streams_path.clone();
@@ -194,6 +194,7 @@ async fn start_stream_inner(
             app_task.clone(),
             stop_for_stream,
             ndi_alpha_enabled,
+            ndi_groups.clone(),
         )
         .await;
         if let Err(e) = res {

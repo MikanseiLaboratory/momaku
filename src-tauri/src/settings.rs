@@ -18,7 +18,7 @@ pub struct AppSettings {
     pub default_ndi_groups: String,
     #[serde(default)]
     pub hide_donation_prompt: bool,
-    /// NDI 送出用に Servo のシェルクリアを透明にする（`prefs::shell_background_color_rgba`）。ページの CSS は変更しない。
+    /// Servo シェル背景の透明クリア（NDI アルファ）。
     #[serde(default)]
     pub ndi_alpha_enabled: bool,
 }
@@ -26,23 +26,14 @@ pub struct AppSettings {
 impl AppSettings {
     pub fn validate(&self) -> Result<(), String> {
         if self.default_ndi_groups.len() > 256 {
-            return Err("既定のNDIグループは256文字以内にしてください".into());
+            return Err("NDIグループは256文字以内にしてください".into());
         }
         Ok(())
     }
 }
 
-/// 行の NDI グループが空のとき、アプリ既定を使う（送出時に適用。`streams.json` は書き換えない）。
-pub fn effective_ndi_groups_for_stream(
-    row_ndi: &Option<String>,
-    settings: &AppSettings,
-) -> Option<String> {
-    if let Some(ref g) = row_ndi {
-        let t = g.trim();
-        if !t.is_empty() {
-            return Some(t.to_string());
-        }
-    }
+/// アプリ設定の NDI グループ（空なら None）。
+pub fn ndi_groups_from_app_settings(settings: &AppSettings) -> Option<String> {
     let t = settings.default_ndi_groups.trim();
     if t.is_empty() {
         None

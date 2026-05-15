@@ -22,6 +22,7 @@ pub async fn run_single_stream(
     app: tauri::AppHandle,
     stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
     ndi_alpha_enabled: bool,
+    ndi_groups: Option<String>,
 ) -> anyhow::Result<()> {
-    servo_thread::run_single_stream(stream_index, cfg, app, stop, ndi_alpha_enabled).await
+    servo_thread::run_single_stream(stream_index, cfg, app, stop, ndi_alpha_enabled, ndi_groups).await
 }

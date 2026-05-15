@@ -6,7 +6,6 @@ export type AppSettings = {
   themeMode: ThemeMode;
   defaultNdiGroups: string;
   hideDonationPrompt: boolean;
-  /** Servo シェルを透明クリア（NDI アルファ用）。ページの CSS は変更しません。送出開始時の設定が使われます。 */
   ndiAlphaEnabled: boolean;
 };
 

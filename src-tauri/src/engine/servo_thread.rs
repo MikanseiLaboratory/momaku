@@ -6,10 +6,9 @@
 //! - 停止時は `DropWithAck` で `Sender` を FFI 側へ渡し、ack をホストが非ブロッキングで待ってから
 //!   `done_tx` を返す（ソースがネットワークに残るのを防ぎ、ホストの `spin` もブロックしない）。
 //! - `fixedFps` は累積デッドライン（`1/fps`）で位相を保ち、`park_until` で次ティックまで待ってから送出する。
-//! - 映像は `send_video_async` と `AsyncVideoToken`（drop / `wait`）でゼロコピー送出する（[grafton-ndi `Sender`](https://docs.rs/grafton-ndi)）。ピクセルは `read_to_image` と同じ **RGBA** をそのまま `PixelFormat::RGBA` で送る。
-//! - `AsyncVideoToken` が送出バッファを借用するため同一 `Sender` での多重 inflight は組めない; `read_to_image` の Vec とスロット上の `ndi_rgba_buffer` を `mem::swap` してアロケーションを再利用する。
+//! - 映像は `send_video_async` / `AsyncVideoToken` で RGBA ゼロコピー（[grafton-ndi `Sender`](https://docs.rs/grafton-ndi)）。inflight 1 件のため `read_to_image` と `ndi_rgba_buffer` を `mem::swap`。
 //! - Servo 資源の drop は一括 `Vec::clear` ではなく順に行い `spin` を挟む（相互デッドロック回避）。
-//! - NDI アルファ用のシェル透明化は **アプリ設定** `ndi_alpha_enabled` のみで行い、`prefs::shell_background_color_rgba` を切り替える（ページ CSS は上書きしない）。
+//! - シェル透明はアプリ設定 `ndi_alpha_enabled`（`shell_background_color_rgba`）。
 //! - 新規 `Sender::new` の前に `flush_deferred_teardown_before_new_streams` で旧送出を片付け、mpsc FIFO で destroy→create の順を保証。
 
 use std::collections::HashMap;
@@ -64,9 +63,9 @@ struct ActiveStream {
     delegate: Rc<DelegateState>,
     rendering_context: Rc<SoftwareRenderingContext>,
     sender: NdiSender,
-    /// `send_video_async` 用 RGBA 非圧縮バッファ（`read_to_image` と同レイアウト、フレームごとに再利用）。
+    /// NDI 用 RGBA バッファ（`send_video_async`）。
     ndi_rgba_buffer: Vec<u8>,
-    /// このストリーム開始時点のアプリ設定 `ndi_alpha_enabled`（ティアダウン後のシェル pref 復帰に使用）。
+    /// 開始時の `ndi_alpha_enabled`（ストリーム終了後のシェル pref 用）。
     ndi_alpha_enabled_at_start: bool,
     /// `fixedFps` の次フレーム送出予定時刻（累積位相）。`None` は初回ティック前。
     fixed_fps_deadline: Option<Instant>,
@@ -77,6 +76,7 @@ enum HostMessage {
         stream_index: usize,
         cfg: StreamConfig,
         ndi_alpha_enabled: bool,
+        ndi_groups: Option<String>,
         stop: Arc<AtomicBool>,
         inputs: InputQueue,
         done_tx: tokio::sync::oneshot::Sender<anyhow::Result<()>>,
@@ -110,6 +110,7 @@ pub async fn run_single_stream(
     app: AppHandle,
     stop: Arc<AtomicBool>,
     ndi_alpha_enabled: bool,
+    ndi_groups: Option<String>,
 ) -> anyhow::Result<()> {
     cfg.validate().map_err(anyhow::Error::msg)?;
 
@@ -125,6 +126,7 @@ pub async fn run_single_stream(
         stream_index,
         cfg,
         ndi_alpha_enabled,
+        ndi_groups,
         stop,
         inputs: input_queue,
         done_tx,
@@ -174,9 +176,10 @@ const NDI_TEARDOWN_TIMEOUT: Duration = Duration::from_secs(60);
 /// メインループのスロットル（`onDemand` のみ。`fixedFps` 時はデッドライン待ちで律速する）。
 const SERVO_HOST_LOOP_SLEEP: Duration = Duration::from_millis(1);
 
-/// アプリ設定に基づき、いずれかの稼働ストリームが透明シェルで開始されていれば `shell_background_color_rgba` を透明にする。
-/// `new_stream_wants` は **まだ `slots` に無い**追加ストリームのフラグ。
-fn want_transparent_ndi_shell(slots: &HashMap<usize, ActiveStream>, new_stream_wants: bool) -> bool {
+fn want_transparent_ndi_shell(
+    slots: &HashMap<usize, ActiveStream>,
+    new_stream_wants: bool,
+) -> bool {
     new_stream_wants || slots.values().any(|s| s.ndi_alpha_enabled_at_start)
 }
 
@@ -435,6 +438,7 @@ fn servo_host_main(cmd_rx: mpsc::Receiver<HostMessage>) {
                     stream_index,
                     cfg,
                     ndi_alpha_enabled,
+                    ndi_groups,
                     stop,
                     inputs,
                     done_tx,
@@ -445,6 +449,7 @@ fn servo_host_main(cmd_rx: mpsc::Receiver<HostMessage>) {
                         stream_index,
                         cfg,
                         ndi_alpha_enabled,
+                        ndi_groups,
                         stop,
                         inputs,
                         done_tx,
@@ -475,6 +480,7 @@ fn servo_host_main(cmd_rx: mpsc::Receiver<HostMessage>) {
             stream_index,
             cfg,
             ndi_alpha_enabled,
+            ndi_groups,
             stop,
             inputs,
             done_tx,
@@ -486,6 +492,7 @@ fn servo_host_main(cmd_rx: mpsc::Receiver<HostMessage>) {
                 stream_index,
                 cfg,
                 ndi_alpha_enabled,
+                ndi_groups,
                 stop,
                 inputs,
                 done_tx,
@@ -501,6 +508,7 @@ fn servo_host_main(cmd_rx: mpsc::Receiver<HostMessage>) {
                 stream_index,
                 cfg,
                 ndi_alpha_enabled,
+                ndi_groups,
                 stop,
                 inputs,
                 done_tx,
@@ -511,6 +519,7 @@ fn servo_host_main(cmd_rx: mpsc::Receiver<HostMessage>) {
                     stream_index,
                     cfg,
                     ndi_alpha_enabled,
+                    ndi_groups,
                     stop,
                     inputs,
                     done_tx,
@@ -673,6 +682,7 @@ fn try_add_stream(
     stream_index: usize,
     cfg: StreamConfig,
     ndi_alpha_enabled: bool,
+    ndi_groups: Option<String>,
     stop: Arc<AtomicBool>,
     inputs: InputQueue,
     done_tx: tokio::sync::oneshot::Sender<anyhow::Result<()>>,
@@ -701,7 +711,6 @@ fn try_add_stream(
         return;
     }
 
-    // WebRender / GL クリア色を、新しい描画コンテキストが生える前に確定させる
     let want_shell = want_transparent_ndi_shell(slots, ndi_alpha_enabled);
     apply_servo_shell_clear_transparency(want_shell);
 
@@ -794,7 +803,7 @@ fn try_add_stream(
     let mut sender_builder = SenderOptions::builder(&cfg.ndi_name)
         .clock_video(cfg.ndi_clock_video)
         .clock_audio(cfg.ndi_clock_audio);
-    if let Some(ref g) = cfg.ndi_groups {
+    if let Some(ref g) = ndi_groups {
         let t = g.trim();
         if !t.is_empty() {
             sender_builder = sender_builder.groups(t);
@@ -843,7 +852,7 @@ fn try_add_stream(
     apply_servo_shell_clear_transparency(want_transparent_ndi_shell(slots, false));
 }
 
-/// RGBA 非圧縮 1 フレーム分。`buffer` は `PixelFormat::RGBA` の最小長以上であること。
+/// RGBA 1 フレーム。`buffer` は解像度に対する最小バイト長以上。
 fn borrowed_rgba_frame<'a>(
     buffer: &'a [u8],
     width: i32,
@@ -880,7 +889,7 @@ fn borrowed_rgba_frame<'a>(
     })
 }
 
-/// NDI へ実際に 1 映像フレームを送れたら `Ok(true)`。スキップ・エラー時は `Ok(false)`。
+/// paint 後に NDI へ 1 フレーム送れたら `true`。
 fn paint_capture_send_ndi(
     runtime: &tokio::runtime::Handle,
     app: &AppHandle,
