@@ -732,12 +732,12 @@ fn remove_finished_streams(
             rendering_context,
             sender,
             ndi_frame_tx,
-            ndi_return_rx: _,
+            mut ndi_return_rx,
             ndi_send_join,
             ndi_alpha_enabled_at_start: _,
             fixed_fps_deadline: _,
             fixed_fps_min_dt: _,
-            frame_buffer_pool: _,
+            mut frame_buffer_pool,
             frame_buffer_pool_cursor: _,
         } = slot;
 
@@ -745,6 +745,14 @@ fn remove_finished_streams(
         if let Some(j) = ndi_send_join {
             let _ = runtime.block_on(j);
         }
+        // ワーカー終了後も返却チャネルに残った Vec を取り切り、プール本体も明示的に縮小してヒープを返す。
+        drain_ndi_return_buffers(&mut frame_buffer_pool, &mut ndi_return_rx);
+        for b in &mut frame_buffer_pool {
+            b.clear();
+            b.shrink_to_fit();
+        }
+        drop(ndi_return_rx);
+        drop(frame_buffer_pool);
         let sender = Arc::try_unwrap(sender).unwrap_or_else(|_| {
             panic!("NDI Sender Arc がワーカー終了後も残存（参照漏れ）");
         });
@@ -978,12 +986,31 @@ fn try_add_stream(
 /// paint 後に NDI 送出ワーカーへ 1 フレーム送れたら `true`。
 ///
 /// `frame_buffer_pool` が空でないときはスロットに `read_to_image` の `Vec` を載せ替え、ワーカーが `send_video`
-/// 後に `Vec` を返却し、`drain_ndi_return_buffers` で空スロットへ戻してヒープの振れを抑える。
+/// 後に `Vec` を返却し、`drain_ndi_return_buffers` が空スロットへラウンドロビンで戻してヒープの振れを抑える。
 fn drain_ndi_return_buffers(pool: &mut [Vec<u8>], rx: &mut UnboundedReceiver<Vec<u8>>) {
+    if pool.is_empty() {
+        while let Ok(mut v) = rx.try_recv() {
+            v.clear();
+            v.shrink_to_fit();
+        }
+        return;
+    }
+    let n = pool.len();
+    let mut start = 0usize;
     while let Ok(mut v) = rx.try_recv() {
         v.clear();
-        if let Some(slot) = pool.iter_mut().find(|s| s.is_empty()) {
-            *slot = v;
+        let mut placed = false;
+        for step in 0..n {
+            let j = (start + step) % n;
+            if pool[j].is_empty() {
+                pool[j] = v;
+                start = (j + 1) % n;
+                placed = true;
+                break;
+            }
+        }
+        if !placed {
+            v.shrink_to_fit();
         }
     }
 }
