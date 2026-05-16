@@ -999,17 +999,13 @@ fn drain_ndi_return_buffers(pool: &mut [Vec<u8>], rx: &mut UnboundedReceiver<Vec
     let mut start = 0usize;
     while let Ok(mut v) = rx.try_recv() {
         v.clear();
-        let mut placed = false;
-        for step in 0..n {
-            let j = (start + step) % n;
-            if pool[j].is_empty() {
-                pool[j] = v;
-                start = (j + 1) % n;
-                placed = true;
-                break;
-            }
-        }
-        if !placed {
+        let empty_j = (0..n)
+            .map(|step| (start + step) % n)
+            .find(|&j| pool[j].is_empty());
+        if let Some(j) = empty_j {
+            pool[j] = v;
+            start = (j + 1) % n;
+        } else {
             v.shrink_to_fit();
         }
     }
