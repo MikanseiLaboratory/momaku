@@ -1,7 +1,8 @@
 //! Servo オフスクリーン + NDI。
 //!
-//! - `Servo` はプロセス内 1 つ、`grafton_ndi::NDI` も `OnceLock` で 1 つ。ストリームごとに `WebView`、
-//!   `SoftwareRenderingContext`、NDI `Sender` を持つ。
+//! - `Servo` はプロセス内 1 つ（`servo-config` のグローバル `Opts` が **プロセスで一度だけ** 初期化されるため、
+//!   アイドル時に `Servo` を drop して再生成するとパニックする。メモリは WebView / コンテキスト / NDI 側で回収する。
+//!   `grafton_ndi::NDI` も `OnceLock` で 1 つ。ストリームごとに `WebView`、`SoftwareRenderingContext`、NDI `Sender` を持つ。
 //! - `Sender::new` / `drop`（`NDIlib_send_destroy`）は grafton-ndi の前提に合わせ Tokio `spawn_blocking` 上の NDI FFI 専用ループ（`ndi_ffi_tx`）に直列化する。
 //! - 停止時は `DropWithAck` で `Sender` を FFI 側へ渡し、ack をホストが非ブロッキングで待ってから
 //!   `done_tx` を返す（ソースがネットワークに残るのを防ぎ、ホストの `spin` もブロックしない）。
@@ -336,6 +337,13 @@ fn queue_ndi_sender_teardown(sender: NdiSender) -> mpsc::Receiver<()> {
     ack_rx
 }
 
+/// `DelegateState` が `WebView` / `RenderingContext` を `RefCell` で保持するため、本体 drop 前に外して参照輪を切る。
+fn clear_delegate_backrefs(delegate: &DelegateState) {
+    let _ = delegate.webview.borrow_mut().take();
+    let _ = delegate.rendering_context.borrow_mut().take();
+    let _ = delegate.pending_popup_webview.borrow_mut().take();
+}
+
 /// Servo インスタンスがないとき、`DeferredTeardown` を単純に順に drop する。
 fn drop_deferred_stack_plain(deferred_teardown: &mut Vec<DeferredTeardown>) {
     while let Some(t) = deferred_teardown.pop() {
@@ -344,6 +352,7 @@ fn drop_deferred_stack_plain(deferred_teardown: &mut Vec<DeferredTeardown>) {
             delegate,
             webview,
         } = t;
+        clear_delegate_backrefs(&delegate);
         drop(webview);
         drop(delegate);
         drop(rendering_context);
@@ -357,6 +366,7 @@ fn teardown_one_stream(servo_ref: &Servo, wrx: &mut UnboundedReceiver<()>, t: De
         delegate,
         webview,
     } = t;
+    clear_delegate_backrefs(&delegate);
     servo_pump_events(servo_ref, wrx);
     drop(webview);
     servo_pump_events(servo_ref, wrx);
@@ -732,12 +742,12 @@ fn remove_finished_streams(
             rendering_context,
             sender,
             ndi_frame_tx,
-            ndi_return_rx: _,
+            mut ndi_return_rx,
             ndi_send_join,
             ndi_alpha_enabled_at_start: _,
             fixed_fps_deadline: _,
             fixed_fps_min_dt: _,
-            frame_buffer_pool: _,
+            mut frame_buffer_pool,
             frame_buffer_pool_cursor: _,
         } = slot;
 
@@ -745,6 +755,14 @@ fn remove_finished_streams(
         if let Some(j) = ndi_send_join {
             let _ = runtime.block_on(j);
         }
+        // ワーカー終了後も返却チャネルに残った Vec を取り切り、プール本体も明示的に縮小してヒープを返す。
+        drain_ndi_return_buffers(&mut frame_buffer_pool, &mut ndi_return_rx);
+        for b in &mut frame_buffer_pool {
+            b.clear();
+            b.shrink_to_fit();
+        }
+        drop(ndi_return_rx);
+        drop(frame_buffer_pool);
         let sender = Arc::try_unwrap(sender).unwrap_or_else(|_| {
             panic!("NDI Sender Arc がワーカー終了後も残存（参照漏れ）");
         });
@@ -978,12 +996,27 @@ fn try_add_stream(
 /// paint 後に NDI 送出ワーカーへ 1 フレーム送れたら `true`。
 ///
 /// `frame_buffer_pool` が空でないときはスロットに `read_to_image` の `Vec` を載せ替え、ワーカーが `send_video`
-/// 後に `Vec` を返却し、`drain_ndi_return_buffers` で空スロットへ戻してヒープの振れを抑える。
+/// 後に `Vec` を返却し、`drain_ndi_return_buffers` が空スロットへラウンドロビンで戻してヒープの振れを抑える。
 fn drain_ndi_return_buffers(pool: &mut [Vec<u8>], rx: &mut UnboundedReceiver<Vec<u8>>) {
+    if pool.is_empty() {
+        while let Ok(mut v) = rx.try_recv() {
+            v.clear();
+            v.shrink_to_fit();
+        }
+        return;
+    }
+    let n = pool.len();
+    let mut start = 0usize;
     while let Ok(mut v) = rx.try_recv() {
         v.clear();
-        if let Some(slot) = pool.iter_mut().find(|s| s.is_empty()) {
-            *slot = v;
+        let empty_j = (0..n)
+            .map(|step| (start + step) % n)
+            .find(|&j| pool[j].is_empty());
+        if let Some(j) = empty_j {
+            pool[j] = v;
+            start = (j + 1) % n;
+        } else {
+            v.shrink_to_fit();
         }
     }
 }
