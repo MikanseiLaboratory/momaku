@@ -1,7 +1,8 @@
 //! Servo オフスクリーン + NDI。
 //!
-//! - `Servo` はプロセス内 1 つ、`grafton_ndi::NDI` も `OnceLock` で 1 つ。ストリームごとに `WebView`、
-//!   `SoftwareRenderingContext`、NDI `Sender` を持つ。
+//! - `Servo` はプロセス内 1 つ（`servo-config` のグローバル `Opts` が **プロセスで一度だけ** 初期化されるため、
+//!   アイドル時に `Servo` を drop して再生成するとパニックする。メモリは WebView / コンテキスト / NDI 側で回収する。
+//!   `grafton_ndi::NDI` も `OnceLock` で 1 つ。ストリームごとに `WebView`、`SoftwareRenderingContext`、NDI `Sender` を持つ。
 //! - `Sender::new` / `drop`（`NDIlib_send_destroy`）は grafton-ndi の前提に合わせ Tokio `spawn_blocking` 上の NDI FFI 専用ループ（`ndi_ffi_tx`）に直列化する。
 //! - 停止時は `DropWithAck` で `Sender` を FFI 側へ渡し、ack をホストが非ブロッキングで待ってから
 //!   `done_tx` を返す（ソースがネットワークに残るのを防ぎ、ホストの `spin` もブロックしない）。
@@ -336,6 +337,13 @@ fn queue_ndi_sender_teardown(sender: NdiSender) -> mpsc::Receiver<()> {
     ack_rx
 }
 
+/// `DelegateState` が `WebView` / `RenderingContext` を `RefCell` で保持するため、本体 drop 前に外して参照輪を切る。
+fn clear_delegate_backrefs(delegate: &DelegateState) {
+    let _ = delegate.webview.borrow_mut().take();
+    let _ = delegate.rendering_context.borrow_mut().take();
+    let _ = delegate.pending_popup_webview.borrow_mut().take();
+}
+
 /// Servo インスタンスがないとき、`DeferredTeardown` を単純に順に drop する。
 fn drop_deferred_stack_plain(deferred_teardown: &mut Vec<DeferredTeardown>) {
     while let Some(t) = deferred_teardown.pop() {
@@ -344,6 +352,7 @@ fn drop_deferred_stack_plain(deferred_teardown: &mut Vec<DeferredTeardown>) {
             delegate,
             webview,
         } = t;
+        clear_delegate_backrefs(&delegate);
         drop(webview);
         drop(delegate);
         drop(rendering_context);
@@ -357,6 +366,7 @@ fn teardown_one_stream(servo_ref: &Servo, wrx: &mut UnboundedReceiver<()>, t: De
         delegate,
         webview,
     } = t;
+    clear_delegate_backrefs(&delegate);
     servo_pump_events(servo_ref, wrx);
     drop(webview);
     servo_pump_events(servo_ref, wrx);
